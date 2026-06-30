@@ -1,10 +1,7 @@
 """Tests for issue #37: ccswitch CLI and active-profile state file."""
 import json
-import sys
 import textwrap
-from pathlib import Path
 
-import pytest
 
 
 TOML_TWO_PROFILES = textwrap.dedent("""\
