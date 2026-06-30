@@ -21,9 +21,24 @@ class UsageEvent:
     usage: dict[str, Any]
 
 
+@dataclass
+class ToolCallStartEvent:
+    """First fragment for a streamed tool call — carries the OAI index, id, and function name."""
+    index: int
+    id: str
+    name: str
+
+
+@dataclass
+class ToolCallDeltaEvent:
+    """Subsequent fragment — carries incremental function.arguments JSON."""
+    index: int
+    partial_json: str
+
+
 async def consume_openai_sse_stream(
     byte_stream: AsyncIterator[bytes],
-) -> AsyncIterator[ContentEvent | FinishEvent | UsageEvent]:
+) -> AsyncIterator[ContentEvent | FinishEvent | UsageEvent | ToolCallStartEvent | ToolCallDeltaEvent]:
     """Parse an OpenAI SSE byte stream and yield typed events.
 
     Handles partial lines split across read boundaries by accumulating a buffer
@@ -66,6 +81,19 @@ async def consume_openai_sse_stream(
             content = delta.get("content")
             if content:
                 yield ContentEvent(text=content)
+
+            tool_calls = delta.get("tool_calls")
+            if tool_calls:
+                for tc in tool_calls:
+                    idx = tc.get("index", 0)
+                    tc_id = tc.get("id")
+                    fn = tc.get("function", {})
+                    name = fn.get("name")
+                    args = fn.get("arguments", "")
+                    if tc_id is not None and name is not None:
+                        yield ToolCallStartEvent(index=idx, id=tc_id, name=name)
+                    if args:
+                        yield ToolCallDeltaEvent(index=idx, partial_json=args)
 
             finish_reason = choice.get("finish_reason")
             if finish_reason:
