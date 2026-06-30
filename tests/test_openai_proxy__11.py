@@ -176,6 +176,29 @@ def test_openai_profile_routes_to_openai_upstream(monkeypatch):
     assert resp.status_code == 200
 
 
+def test_openai_non_stream_upstream_error_propagated(monkeypatch):
+    """Non-streaming OpenAI mode forwards upstream error without crashing."""
+    monkeypatch.setenv("CCPROXY_PROFILE", "openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", OPENAI_BASE)
+    monkeypatch.setenv("OPENAI_API_KEY", OPENAI_KEY)
+    monkeypatch.setenv("OPENAI_MODEL", OPENAI_MODEL)
+
+    error_body = json.dumps(
+        {"type": "about:blank", "title": "Unauthorized", "status": 401}
+    ).encode()
+    mock_client, _ = _make_openai_mock_client(status=401, response_body=error_body)
+    with TestClient(app) as tc:
+        _setup_openai(mock_client)
+        resp = tc.post(
+            "/v1/messages",
+            content=ANTHROPIC_REQUEST_BODY,
+            headers={"content-type": "application/json"},
+        )
+
+    assert resp.status_code == 401
+    assert resp.content == error_body
+
+
 def test_missing_profile_defaults_to_anthropic_passthrough(monkeypatch):
     """AC(a): absent CCPROXY_PROFILE defaults to anthropic passthrough."""
     monkeypatch.delenv("CCPROXY_PROFILE", raising=False)
