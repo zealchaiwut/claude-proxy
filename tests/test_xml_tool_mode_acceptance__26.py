@@ -11,7 +11,6 @@ Tests verify:
 
 import json
 
-import pytest
 from fastapi.testclient import TestClient
 
 from config import Settings

@@ -1,7 +1,6 @@
 """Tests for issue #23: translate OpenAI tool_calls to Anthropic tool_use in from_openai_response."""
 import logging
 
-import pytest
 
 from schemas.anthropic import MessagesResponse, TextBlock, ToolUseBlock
 from schemas.openai import ChatMessage, ChatResponse, Choice, Usage
