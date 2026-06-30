@@ -14,7 +14,6 @@ from io import StringIO
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
-import pytest
 from fastapi.testclient import TestClient
 
 from config import Settings
@@ -201,7 +200,7 @@ def test_request_record_has_drift_fields_when_upstream_usage_present():
         _setup(_http_client(_anthropic_body(10, 5, "Hi")), registry, collector, capture)
         _post_request(tc, "alpha", _request_body("hello"))
 
-    lines = [l for l in capture.getvalue().splitlines() if l.startswith("{")]
+    lines = [ln for ln in capture.getvalue().splitlines() if ln.startswith("{")]
     assert lines, "No JSON log records emitted"
     record = json.loads(lines[0])
     assert "token_drift_input" in record
@@ -220,7 +219,7 @@ def test_request_record_drift_null_when_no_upstream_usage():
         _setup(_http_client(_no_usage_body("Hi")), registry, collector, capture)
         _post_request(tc, "alpha", _request_body("hello"))
 
-    lines = [l for l in capture.getvalue().splitlines() if l.startswith("{")]
+    lines = [ln for ln in capture.getvalue().splitlines() if ln.startswith("{")]
     assert lines, "No JSON log records emitted"
     record = json.loads(lines[0])
     assert "token_drift_input" in record
@@ -243,7 +242,7 @@ def test_request_record_drift_values_match_formula():
         _setup(_http_client(_anthropic_body(10, 5, "Hi")), registry, collector, capture)
         _post_request(tc, "alpha", _request_body("hello"))
 
-    lines = [l for l in capture.getvalue().splitlines() if l.startswith("{")]
+    lines = [ln for ln in capture.getvalue().splitlines() if ln.startswith("{")]
     record = json.loads(lines[0])
     assert record["token_drift_input"] == -9, f"Expected -9, got {record['token_drift_input']}"
     assert record["token_drift_output"] == -4, f"Expected -4, got {record['token_drift_output']}"
@@ -390,7 +389,7 @@ def test_existing_record_fields_preserved():
         _setup(_http_client(_anthropic_body(10, 5)), registry, collector, capture)
         _post_request(tc, "alpha", _request_body())
 
-    lines = [l for l in capture.getvalue().splitlines() if l.startswith("{")]
+    lines = [ln for ln in capture.getvalue().splitlines() if ln.startswith("{")]
     assert lines, "No JSON records emitted"
     record = json.loads(lines[0])
     missing = EXISTING_RECORD_FIELDS - set(record.keys())

@@ -78,6 +78,9 @@ class RequestLogger:
         ticket: str | None = None,
         token_drift_input: int | None = None,
         token_drift_output: int | None = None,
+        cache_read_input_tokens: int | None = None,
+        cache_creation_input_tokens: int | None = None,
+        cache_miss_estimate: int | None = None,
     ) -> dict:
         return {
             "request_id": str(uuid.uuid4()),
@@ -97,6 +100,9 @@ class RequestLogger:
             "ticket": ticket,
             "token_drift_input": token_drift_input,
             "token_drift_output": token_drift_output,
+            "cache_read_input_tokens": cache_read_input_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+            "cache_miss_estimate": cache_miss_estimate,
         }
 
     def emit(self, record: dict) -> None:

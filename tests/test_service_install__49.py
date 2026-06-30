@@ -217,8 +217,6 @@ def test_readme_documents_log_viewing():
 @pytest.mark.skip(reason="Requires live service manager — run manually per UAT steps")
 def test_service_restarts_within_30s():
     """AC: after killing the proxy, the service manager restarts it within 30 seconds."""
-    import time
-    import signal
     # This test is intentionally skipped in unit-test mode.
     # UAT step: kill -9 <pid> and verify the process reappears within 30s.
     pass
