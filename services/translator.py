@@ -78,6 +78,68 @@ def _sse_frame(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
 
+async def stream_to_anthropic_sse(
+    event_stream: AsyncIterator,
+    *,
+    model: str,
+    message_id: str | None = None,
+) -> AsyncIterator[str]:
+    """Translate a pre-parsed OpenAI event stream to Anthropic SSE frames.
+
+    Accepts an async iterator of ContentEvent / FinishEvent / UsageEvent objects
+    (duck-typed: needs .text, .reason, or .usage attribute). When no UsageEvent
+    arrives, falls back to a character-count estimate so output_tokens is non-zero.
+    """
+    mid = message_id or f"msg_{uuid.uuid4().hex[:24]}"
+    stop_reason = "end_turn"
+    output_tokens: int | None = None
+    collected_text: list[str] = []
+
+    yield _sse_frame("message_start", {
+        "type": "message_start",
+        "message": {
+            "id": mid,
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [],
+            "usage": {"input_tokens": 0},
+        },
+    })
+    yield _sse_frame("content_block_start", {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "text", "text": ""},
+    })
+
+    async for event in event_stream:
+        if hasattr(event, "text"):
+            collected_text.append(event.text)
+            yield _sse_frame("content_block_delta", {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": event.text},
+            })
+        elif hasattr(event, "reason"):
+            stop_reason = _FINISH_REASON_MAP.get(event.reason, "end_turn")
+        elif hasattr(event, "usage"):
+            ct = event.usage.get("completion_tokens", 0) or 0
+            if ct:
+                output_tokens = ct
+
+    if output_tokens is None:
+        full_text = "".join(collected_text)
+        output_tokens = max(1, len(full_text) // 4) if full_text else 1
+
+    yield _sse_frame("content_block_stop", {"type": "content_block_stop", "index": 0})
+    yield _sse_frame("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+        "usage": {"output_tokens": output_tokens},
+    })
+    yield _sse_frame("message_stop", {"type": "message_stop"})
+
+
 async def live_stream_to_anthropic_sse(
     byte_stream: AsyncIterator[bytes],
     *,
