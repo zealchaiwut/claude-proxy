@@ -1,4 +1,3 @@
-# M1 limitation: image and tool blocks (image, tool_use, tool_result) are silently skipped; full support deferred to M3.
 from __future__ import annotations
 
 import asyncio
@@ -68,8 +67,30 @@ def _map_tool_choice(anthropic_choice: Any) -> Any:
     return anthropic_choice
 
 
+def _block_type(block: Any) -> str:
+    if isinstance(block, dict):
+        return block.get("type", "")
+    return getattr(block, "type", "")
+
+
+def _block_get(block: Any, attr: str, default: Any = None) -> Any:
+    if isinstance(block, dict):
+        return block.get(attr, default)
+    return getattr(block, attr, default)
+
+
+def _tool_result_content_str(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return _extract_text(content)
+    return json.dumps(content)
+
+
 def to_openai_request(anthropic_req: MessagesRequest, model: str) -> ChatRequest:
-    messages: list[dict[str, str]] = []
+    messages: list[dict] = []
 
     if anthropic_req.system is not None:
         if isinstance(anthropic_req.system, str):
@@ -83,11 +104,49 @@ def to_openai_request(anthropic_req: MessagesRequest, model: str) -> ChatRequest
     for turn in anthropic_req.messages:
         if isinstance(turn, dict):
             role = turn.get("role", "user")
-            content = _extract_text(turn.get("content", ""))
+            raw_content = turn.get("content", "")
         else:
             role = getattr(turn, "role", "user")
-            content = _extract_text(getattr(turn, "content", ""))
-        messages.append({"role": role, "content": content})
+            raw_content = getattr(turn, "content", "")
+
+        if isinstance(raw_content, list):
+            if role == "assistant":
+                tool_use_blocks = [b for b in raw_content if _block_type(b) == "tool_use"]
+                if tool_use_blocks:
+                    tool_calls = [
+                        {
+                            "id": _block_get(b, "id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": _block_get(b, "name", ""),
+                                "arguments": json.dumps(_block_get(b, "input", {}) or {}),
+                            },
+                        }
+                        for b in tool_use_blocks
+                    ]
+                    msg: dict = {"role": "assistant", "tool_calls": tool_calls}
+                    text_str = _extract_text(raw_content)
+                    if text_str:
+                        msg["content"] = text_str
+                    messages.append(msg)
+                    continue
+            elif role == "user":
+                tool_result_blocks = [b for b in raw_content if _block_type(b) == "tool_result"]
+                if tool_result_blocks:
+                    for b in tool_result_blocks:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": _block_get(b, "tool_use_id", ""),
+                            "content": _tool_result_content_str(_block_get(b, "content", "")),
+                        })
+                    other_text = _extract_text(
+                        [b for b in raw_content if _block_type(b) != "tool_result"]
+                    )
+                    if other_text:
+                        messages.append({"role": "user", "content": other_text})
+                    continue
+
+        messages.append({"role": role, "content": _extract_text(raw_content)})
 
     oai_tools = _map_tools(anthropic_req.tools) if anthropic_req.tools else None
     oai_tool_choice = _map_tool_choice(anthropic_req.tool_choice) if anthropic_req.tool_choice is not None else None
