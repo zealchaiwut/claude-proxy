@@ -126,6 +126,7 @@ def to_openai_request(
     *,
     prompt_cache: str = "none",
     cache_provider_hint: str | None = None,
+    thinking_mode: str = "disabled",
 ) -> ChatRequest:
     messages: list[dict[str, str]] = []
     has_cache_marker = False
@@ -215,7 +216,7 @@ def to_openai_request(
     ):
         extra_kwargs["cache_control"] = {"type": "ephemeral"}
 
-    return ChatRequest(
+    req = ChatRequest(
         model=model,
         messages=messages,
         max_tokens=anthropic_req.max_tokens,
@@ -223,6 +224,21 @@ def to_openai_request(
         tool_choice=oai_tool_choice,
         **extra_kwargs,
     )
+
+    # Extended-thinking handling. ChatRequest has extra="allow", so assigning
+    # req.thinking serializes into the upstream JSON.
+    #   "disabled" (default): force thinking off so the upstream never enables it
+    #                         with a budget that can exceed max_tokens.
+    #   "forward": pass the client's thinking block through unchanged when present.
+    #   "strip": send no thinking field at all (for upstreams that reject it).
+    if thinking_mode == "disabled":
+        req.thinking = {"type": "disabled"}
+    elif thinking_mode == "forward":
+        if anthropic_req.thinking is not None:
+            req.thinking = anthropic_req.thinking
+    # "strip" (or anything else): leave thinking unset.
+
+    return req
 
 
 _FINISH_REASON_MAP: dict[str, str] = {
@@ -401,6 +417,9 @@ async def live_stream_to_anthropic_sse(
 def from_openai_response(openai_resp: ChatResponse) -> MessagesResponse:
     """Convert a non-streaming OpenAI ChatCompletion response to an Anthropic MessagesResponse."""
     choice = openai_resp.choices[0]
+    # Only real content becomes Anthropic text. Any upstream reasoning /
+    # reasoning_content / thinking field lands in ChatMessage's extra (extra=
+    # "allow") and is deliberately NOT read here, so it never leaks as a text block.
     text = choice.message.content or ""
     stop_reason = _FINISH_REASON_MAP.get(choice.finish_reason or "", "end_turn")
 

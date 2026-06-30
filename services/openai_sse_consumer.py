@@ -78,6 +78,9 @@ async def consume_openai_sse_stream(
             choice = choices[0]
             delta = choice.get("delta", {})
 
+            # Only real content becomes an Anthropic text_delta. Any upstream
+            # reasoning / reasoning_content / thinking delta is deliberately
+            # ignored so the model's reasoning never leaks into text output.
             content = delta.get("content")
             if content:
                 yield ContentEvent(text=content)
