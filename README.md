@@ -57,12 +57,15 @@ Streaming (`stream: true`) is fully supported — OpenAI SSE chunks are translat
 | `OPENAI_API_KEY` | — | API key for OpenAI-compatible API (OpenAI mode) |
 | `OPENAI_MODEL` | `gpt-4o` | Model name sent upstream (OpenAI mode) |
 | `CCPROXY_TOOL_MODE` | `native` | Tool call mode in OpenAI mode: `native` (function calling) or `xml` (XML prompt injection) |
+| `CCPROXY_LOG_FILE` | `~/.local/state/claude-proxy/requests.jsonl` | Path for the per-request JSONL log file; parent directories are created automatically |
+| `METRICS_WINDOW_SECONDS` | _(all-time)_ | If set, `GET /metrics` only includes samples from the last N seconds |
 
 ## Proxied Endpoints
 
 | Endpoint | Behaviour |
 |---|---|
 | `GET /health` | Proxy health check — not forwarded upstream |
+| `GET /metrics` | Per-profile rolling metrics summary (request count, token totals, latency percentiles) |
 | `POST /v1/messages` | Passthrough (Anthropic mode) or translated (OpenAI mode) |
 | `POST /v1/messages/count_tokens` | Passthrough (Anthropic mode) or heuristic estimate (OpenAI mode) |
 | `GET /v1/models` | Transparent passthrough |
@@ -128,6 +131,119 @@ When two subprocesses run concurrently with different `CCPROXY_PROFILE` values, 
 ### model_map rewriting
 
 When the resolved profile includes a `model_map`, the client's requested model name is rewritten to the upstream model string before the request is forwarded. This lets Claude Code send its native model names (e.g. `claude-haiku-4-5-20251001`) while the proxy transparently maps them to whatever the target backend expects.
+
+## Request Logging
+
+Every proxied request through `POST /v1/messages` produces one JSONL record written to `~/.local/state/claude-proxy/requests.jsonl` (override with `CCPROXY_LOG_FILE`). The parent directory is created automatically. Each line is a complete JSON object:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `request_id` | string (UUID) | Unique identifier for this request |
+| `timestamp` | ISO-8601 string | UTC time the record was emitted |
+| `profile_name` | string | Profile used (`anthropic`, `openai`, etc.) |
+| `profile_kind` | string | `passthrough` or `openai` |
+| `requested_model` | string | Model name the client sent |
+| `upstream_model` | string | Model name forwarded upstream (after `model_map` rewrite) |
+| `upstream_host` | string | Hostname of the upstream API |
+| `method` | string | HTTP method (`POST`) |
+| `path` | string | Request path (`/v1/messages`) |
+| `status` | integer | HTTP status code from upstream |
+| `latency_ms` | float | Total round-trip latency in milliseconds |
+| `streamed` | boolean | Whether the response was streamed |
+| `run_id` | string\|null | Value of `X-CCProxy-Run` header, or null |
+| `role` | string\|null | Value of `X-CCProxy-Role` header, or null |
+| `ticket` | string\|null | Value of `X-CCProxy-Ticket` header, or null |
+
+No request body, response body, or API keys are written to the log.
+
+## Metrics
+
+`GET /metrics` returns a snapshot of in-memory per-profile statistics accumulated since the proxy started (or since `METRICS_WINDOW_SECONDS` ago, if that env var is set):
+
+```json
+{
+  "profiles": {
+    "anthropic": {
+      "request_count": 42,
+      "error_count": 1,
+      "total_input_tokens": 18340,
+      "total_output_tokens": 6120,
+      "total_est_cost_usd": 0.0469,
+      "p50_latency_ms": 312.4,
+      "p95_latency_ms": 891.2
+    }
+  }
+}
+```
+
+Token totals and cost are only accumulated for successful (2xx) responses. The metrics collector is in-memory only — it never reads the JSONL log file.
+
+## Correlation Headers
+
+Three optional request headers let callers tag each request with Commander dispatch metadata. The proxy reads them, stores their values on the request record, and ignores them for routing or profile selection.
+
+| Header | Record field | Purpose |
+|--------|-------------|---------|
+| `X-CCProxy-Run` | `run_id` | Identifies the Commander run (e.g. sprint ID or UUID) that spawned this subprocess |
+| `X-CCProxy-Role` | `role` | The agent role (e.g. `coder`, `tester`, `estimator`) assigned to this subprocess |
+| `X-CCProxy-Ticket` | `ticket` | The issue or ticket reference being worked (e.g. `PROJ-42`) |
+
+When a header is present its value is stored as a string. When a header is absent the field is `null`. No combination of header values affects profile selection or upstream routing.
+
+### Injecting headers in Commander
+
+Pass the headers via `subprocess.Popen` using the `env` parameter or an explicit header dict in the launcher. Environment-variable forwarding is the simplest approach because `claude` (the CLI) sets `ANTHROPIC_BASE_URL` but does not automatically forward custom headers — the launcher must inject them explicitly:
+
+```python
+# In Commander's agent launcher (e.g. services/dispatcher.py)
+import subprocess, os
+
+env = {**os.environ, "ANTHROPIC_BASE_URL": "http://localhost:8788"}
+
+proc = subprocess.Popen(
+    ["claude", "--profile", "coder", ...],
+    env=env,
+    # Commander wraps the claude CLI with a thin HTTP shim that injects headers:
+    # X-CCProxy-Run: <run_id>
+    # X-CCProxy-Role: coder
+    # X-CCProxy-Ticket: PROJ-42
+)
+```
+
+Alternatively, if your launcher speaks HTTP directly (e.g. via `httpx`):
+
+```python
+headers = {
+    "X-CCProxy-Run": run_id,
+    "X-CCProxy-Role": "coder",
+    "X-CCProxy-Ticket": "PROJ-42",
+}
+response = client.post("http://localhost:8788/v1/messages", headers=headers, json=body)
+```
+
+### Sample log record
+
+A request tagged with all three headers produces a JSONL record like:
+
+```json
+{
+  "request_id": "a1b2c3d4-...",
+  "timestamp": "2026-06-30T10:00:00.000000+00:00",
+  "profile_name": "anthropic",
+  "profile_kind": "passthrough",
+  "requested_model": "claude-sonnet-4-6",
+  "upstream_model": "claude-sonnet-4-6",
+  "upstream_host": "api.anthropic.com",
+  "method": "POST",
+  "path": "/v1/messages",
+  "status": 200,
+  "latency_ms": 312.4,
+  "streamed": false,
+  "run_id": "run-42",
+  "role": "coder",
+  "ticket": "PROJ-42"
+}
+```
 
 ## Running Tests
 

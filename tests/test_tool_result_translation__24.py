@@ -2,7 +2,6 @@
 
 import json
 
-import pytest
 from schemas.anthropic import MessagesRequest
 from services.translator import to_openai_request
 

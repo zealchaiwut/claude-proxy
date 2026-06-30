@@ -1,6 +1,4 @@
 """Tests for issue #8: Pydantic schemas for Anthropic API shapes."""
-import pytest
-from pydantic import ValidationError
 
 from schemas.anthropic import (
     ImageBlock,
