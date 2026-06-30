@@ -1,4 +1,3 @@
-# M1 limitation: image and tool blocks (image, tool_use, tool_result) are silently skipped; full support deferred to M3.
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +18,46 @@ from services.openai_sse_consumer import (
     consume_openai_sse_stream,
 )
 from services.sse import anthropic_sse_stream
+
+
+def _get_blocks(content: Any) -> list[Any]:
+    """Return content as a list of block dicts/objects (empty if content is a plain string)."""
+    if isinstance(content, list):
+        return content
+    return []
+
+
+def _block_type(block: Any) -> str:
+    if isinstance(block, dict):
+        return block.get("type", "")
+    return getattr(block, "type", "")
+
+
+def _has_tool_use(content: Any) -> bool:
+    return any(_block_type(b) == "tool_use" for b in _get_blocks(content))
+
+
+def _has_tool_result(content: Any) -> bool:
+    return any(_block_type(b) == "tool_result" for b in _get_blocks(content))
+
+
+def _tool_result_content_to_str(value: Any) -> str:
+    """Convert tool_result content to a string for the OpenAI tool message."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(item.get("text", ""))
+            elif hasattr(item, "type") and item.type == "text":
+                parts.append(item.text)
+            else:
+                parts.append(json.dumps(item) if isinstance(item, dict) else str(item))
+        return "".join(parts)
+    return json.dumps(value)
 
 
 def _extract_text(content: Any) -> str:
@@ -83,11 +122,57 @@ def to_openai_request(anthropic_req: MessagesRequest, model: str) -> ChatRequest
     for turn in anthropic_req.messages:
         if isinstance(turn, dict):
             role = turn.get("role", "user")
-            content = _extract_text(turn.get("content", ""))
+            raw_content = turn.get("content", "")
         else:
             role = getattr(turn, "role", "user")
-            content = _extract_text(getattr(turn, "content", ""))
-        messages.append({"role": role, "content": content})
+            raw_content = getattr(turn, "content", "")
+
+        if role == "assistant" and _has_tool_use(raw_content):
+            blocks = _get_blocks(raw_content)
+            tool_calls = []
+            text_parts = []
+            for block in blocks:
+                btype = _block_type(block)
+                if btype == "tool_use":
+                    if isinstance(block, dict):
+                        bid, bname, binput = block["id"], block["name"], block.get("input", {})
+                    else:
+                        bid, bname, binput = block.id, block.name, block.input
+                    tool_calls.append({
+                        "id": bid,
+                        "type": "function",
+                        "function": {
+                            "name": bname,
+                            "arguments": json.dumps(binput),
+                        },
+                    })
+                elif btype == "text":
+                    text_parts.append(block["text"] if isinstance(block, dict) else block.text)
+            msg: dict[str, Any] = {"role": "assistant", "tool_calls": tool_calls}
+            if text_parts:
+                msg["content"] = "".join(text_parts)
+            messages.append(msg)
+
+        elif role == "user" and _has_tool_result(raw_content):
+            blocks = _get_blocks(raw_content)
+            text_parts = []
+            for block in blocks:
+                btype = _block_type(block)
+                if btype == "tool_result":
+                    if isinstance(block, dict):
+                        tid = block["tool_use_id"]
+                        tcontent = _tool_result_content_to_str(block.get("content"))
+                    else:
+                        tid = block.tool_use_id
+                        tcontent = _tool_result_content_to_str(getattr(block, "content", None))
+                    messages.append({"role": "tool", "tool_call_id": tid, "content": tcontent})
+                elif btype == "text":
+                    text_parts.append(block["text"] if isinstance(block, dict) else block.text)
+            if text_parts:
+                messages.append({"role": "user", "content": "".join(text_parts)})
+
+        else:
+            messages.append({"role": role, "content": _extract_text(raw_content)})
 
     oai_tools = _map_tools(anthropic_req.tools) if anthropic_req.tools else None
     oai_tool_choice = _map_tool_choice(anthropic_req.tool_choice) if anthropic_req.tool_choice is not None else None
