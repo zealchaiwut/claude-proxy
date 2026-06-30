@@ -1,5 +1,7 @@
 import json
 import os
+import time
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Request, Response
@@ -9,6 +11,7 @@ from profiles import ProfileRegistry, resolve_profile_name
 from routers._proxy_utils import filter_headers, proxy_request
 from schemas.anthropic import MessagesRequest, TextBlock
 from schemas.openai import ChatResponse
+from services.request_logger import RequestLogger
 from services.translator import from_openai_response, live_stream_to_anthropic_sse, to_openai_request
 
 router = APIRouter()
@@ -45,6 +48,10 @@ def _get_profile_name(request: Request) -> str:
         header=request.headers.get("x-ccproxy-profile"),
         query_param=request.query_params.get("profile"),
     )
+
+
+def _hostname(url: str) -> str:
+    return urlparse(url).hostname or url
 
 
 async def _passthrough(
@@ -91,19 +98,17 @@ async def _passthrough(
     )
 
 
-@router.post("/v1/messages")
-async def messages_passthrough(request: Request) -> Response:
-    body_bytes = await request.body()
-    headers = _filter_headers(request.headers)
+async def _dispatch(
+    request: Request,
+    body_bytes: bytes,
+    body_json: dict,
+    headers: dict[str, str],
+    profile_name: str,
+) -> tuple[Response, dict]:
+    """Route the request and return (response, log_meta).
 
-    try:
-        body_json = json.loads(body_bytes)
-    except (ValueError, TypeError):
-        body_json = {}
-
-    profile_name = _get_profile_name(request)
-
-    # Registry path: used when a config.toml was loaded at startup
+    log_meta contains: profile_kind, upstream_model, upstream_host.
+    """
     config_from_file: bool = getattr(request.app.state, "config_from_file", False)
     if config_from_file:
         registry: ProfileRegistry | None = getattr(request.app.state, "profile_registry", None)
@@ -117,26 +122,137 @@ async def messages_passthrough(request: Request) -> Response:
                         or model
                         or os.getenv("OPENAI_MODEL", "gpt-4o")
                     )
-                    return await _handle_openai_mode(
+                    response = await _handle_openai_mode(
                         request,
                         body_json,
                         openai_base_url=upstream_url,
                         openai_api_key=api_key,
                         openai_model=upstream_model,
                     )
+                    return response, {
+                        "profile_kind": "openai",
+                        "upstream_model": upstream_model,
+                        "upstream_host": _hostname(upstream_url),
+                    }
+                # passthrough path (with optional model_map rewrite)
+                upstream_model = client_model
                 if model_map and client_model in model_map:
-                    body_json = {**body_json, "model": model_map[client_model]}
+                    upstream_model = model_map[client_model]
+                    body_json = {**body_json, "model": upstream_model}
                     body_bytes = json.dumps(body_json).encode()
-                return await _passthrough(request, body_bytes, body_json, headers, upstream_url)
+                response = await _passthrough(request, body_bytes, body_json, headers, upstream_url)
+                return response, {
+                    "profile_kind": "passthrough",
+                    "upstream_model": upstream_model,
+                    "upstream_host": _hostname(upstream_url),
+                }
             except KeyError:
                 pass  # profile not in registry; fall through to legacy
 
     # Legacy path (env-var based, backward-compatible with M1/M2 behavior)
     if profile_name == "openai":
-        return await _handle_openai_mode(request, body_json)
+        openai_base_url = os.getenv("OPENAI_BASE_URL", "")
+        upstream_model = os.getenv("OPENAI_MODEL", "gpt-4o")
+        response = await _handle_openai_mode(request, body_json)
+        return response, {
+            "profile_kind": "openai",
+            "upstream_model": upstream_model,
+            "upstream_host": _hostname(openai_base_url),
+        }
 
     settings = request.app.state.settings
-    return await _passthrough(request, body_bytes, body_json, headers, settings.upstream_base_url)
+    response = await _passthrough(
+        request, body_bytes, body_json, headers, settings.upstream_base_url
+    )
+    return response, {
+        "profile_kind": "passthrough",
+        "upstream_model": body_json.get("model", ""),
+        "upstream_host": _hostname(settings.upstream_base_url),
+    }
+
+
+def _attach_logging(
+    request_logger: RequestLogger,
+    response: Response,
+    *,
+    profile_name: str,
+    requested_model: str,
+    method: str,
+    path: str,
+    start: float,
+    log_meta: dict,
+) -> Response:
+    """Attach logging to response; wraps StreamingResponse body iterator for streamed requests."""
+    if isinstance(response, StreamingResponse):
+        original = response.body_iterator
+        _start = start
+
+        async def _wrapped():
+            try:
+                async for chunk in original:
+                    yield chunk
+            finally:
+                latency_ms = (time.monotonic() - _start) * 1000
+                record = request_logger.make_record(
+                    profile_name=profile_name,
+                    requested_model=requested_model,
+                    method=method,
+                    path=path,
+                    status=response.status_code,
+                    latency_ms=latency_ms,
+                    streamed=True,
+                    **log_meta,
+                )
+                request_logger.emit(record)
+
+        response.body_iterator = _wrapped()
+    else:
+        latency_ms = (time.monotonic() - start) * 1000
+        record = request_logger.make_record(
+            profile_name=profile_name,
+            requested_model=requested_model,
+            method=method,
+            path=path,
+            status=response.status_code,
+            latency_ms=latency_ms,
+            streamed=False,
+            **log_meta,
+        )
+        request_logger.emit(record)
+
+    return response
+
+
+@router.post("/v1/messages")
+async def messages_passthrough(request: Request) -> Response:
+    start = time.monotonic()
+    body_bytes = await request.body()
+    headers = _filter_headers(request.headers)
+
+    try:
+        body_json = json.loads(body_bytes)
+    except (ValueError, TypeError):
+        body_json = {}
+
+    profile_name = _get_profile_name(request)
+    requested_model = body_json.get("model", "")
+
+    response, log_meta = await _dispatch(request, body_bytes, body_json, headers, profile_name)
+
+    request_logger: RequestLogger | None = getattr(request.app.state, "request_logger", None)
+    if request_logger is not None:
+        response = _attach_logging(
+            request_logger,
+            response,
+            profile_name=profile_name,
+            requested_model=requested_model,
+            method=request.method,
+            path=request.url.path,
+            start=start,
+            log_meta=log_meta,
+        )
+
+    return response
 
 
 def _get_system_text(req: MessagesRequest) -> str | None:
