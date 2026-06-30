@@ -75,6 +75,60 @@ Streaming (`stream: true`) is fully supported — OpenAI SSE chunks are translat
 | Upstream unreachable (TCP failure) | `502` | `{"error": "bad_gateway", "message": "upstream unreachable"}` |
 | Upstream timeout | `504` | `{"error": "gateway_timeout", "message": "upstream timed out"}` |
 
+## Using claude-proxy with Commander
+
+Commander dispatches multiple concurrent agent subprocesses (coder, tester, estimator, docs-only). Each subprocess can target a different backend through the same proxy instance — a cheap/local backend for low-cost agents and the full Anthropic subscription backend for the coder — without any global state race.
+
+### Setup
+
+1. Start the proxy with a `config.toml` that defines the profiles you need:
+
+```toml
+[profiles.anthropic]
+kind = "passthrough"
+upstream = "https://api.anthropic.com"
+
+[profiles.cheap]
+kind = "openai"
+upstream = "http://localhost:11434/v1"   # e.g. Ollama
+api_key_env = "OLLAMA_API_KEY"
+model = "llama3.2"
+
+[profiles.cheap.model_map]
+"claude-haiku-4-5-20251001" = "llama3.2"
+"claude-sonnet-4-6" = "llama3.2"
+```
+
+2. In your Commander configuration, point every agent at the proxy and assign a profile per agent role via the `X-CCProxy-Profile` request header or the `CCPROXY_PROFILE` environment variable:
+
+```bash
+# Proxy URL for all agents
+export ANTHROPIC_BASE_URL=http://localhost:8788
+
+# Per-subprocess profile selection (precedence: header > env > state.json > default)
+#
+# Coder subprocess — full Anthropic subscription backend:
+CCPROXY_PROFILE=anthropic claude ...
+#
+# Tester / Estimator / Docs subprocess — cheap/local backend:
+CCPROXY_PROFILE=cheap claude ...
+```
+
+When two subprocesses run concurrently with different `CCPROXY_PROFILE` values, requests from each subprocess are routed to their respective backends independently — there is no shared mutable state in the proxy hot path, so profiles never bleed across subprocesses.
+
+### Profile selection precedence
+
+| Priority | Mechanism | Scope |
+|----------|-----------|-------|
+| 1 (highest) | `X-CCProxy-Profile` request header | single request |
+| 2 | `CCPROXY_PROFILE` env var (subprocess environment) | all requests from that process |
+| 3 | `active_profile` in `state.json` | global default (dashboard-managed) |
+| 4 (lowest) | Built-in `anthropic` | fallback |
+
+### model_map rewriting
+
+When the resolved profile includes a `model_map`, the client's requested model name is rewritten to the upstream model string before the request is forwarded. This lets Claude Code send its native model names (e.g. `claude-haiku-4-5-20251001`) while the proxy transparently maps them to whatever the target backend expects.
+
 ## Running Tests
 
 ```bash
