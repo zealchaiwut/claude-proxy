@@ -13,16 +13,15 @@ def test_health_default_shape():
 
 
 def test_health_upstream_override():
-    """AC: UPSTREAM_BASE_URL env var is reflected in /health response."""
+    """AC: UPSTREAM_BASE_URL env var is reflected in /health response via the default profile."""
+    import os
     from main import app
-    from config import get_settings, Settings
 
-    custom = Settings(upstream_base_url="https://my-gateway.internal")
-    app.dependency_overrides[get_settings] = lambda: custom
+    os.environ["UPSTREAM_BASE_URL"] = "https://my-gateway.internal"
     try:
         client = TestClient(app)
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json()["upstream"] == "https://my-gateway.internal"
     finally:
-        app.dependency_overrides.clear()
+        del os.environ["UPSTREAM_BASE_URL"]

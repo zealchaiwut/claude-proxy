@@ -3,10 +3,11 @@ from contextlib import asynccontextmanager
 
 import httpx
 import uvicorn
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 
-from config import Settings, get_settings
+from config import get_settings
 from profiles import ProfileRegistry, get_or_load_config
+from routers.health import router as health_router
 from routers.messages import router as messages_router
 from routers.metrics import router as metrics_router
 from routers.models import router as models_router
@@ -35,15 +36,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(health_router)
 app.include_router(messages_router)
 app.include_router(metrics_router)
 app.include_router(models_router)
 app.include_router(passthrough_router)
-
-
-@app.get("/health")
-def health(settings: Settings = Depends(get_settings)):
-    return {"status": "ok", "upstream": settings.upstream_base_url}
 
 
 def main() -> None:
