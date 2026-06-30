@@ -21,6 +21,7 @@ class ProfileConfig:
     model: str | None = None
     model_map: dict[str, str] = field(default_factory=dict)
     pricing: PricingConfig | None = None
+    tokenizer: str = "heuristic"  # "heuristic" | "openai"
 
 
 @dataclass
@@ -56,6 +57,14 @@ class ProfileRegistry:
             return None
         return profile.pricing
 
+    def get_tokenizer(self, name: str):
+        """Return a Tokenizer for the named profile (heuristic by default)."""
+        from services.tokenizer import get_tokenizer as _get_tok
+
+        profile = self._config.profiles.get(name)
+        tok_name = profile.tokenizer if profile is not None else "heuristic"
+        return _get_tok(tok_name)
+
 
 def load_config(path: Path) -> ProxyConfig:
     """Parse a config.toml file into a ProxyConfig."""
@@ -86,6 +95,7 @@ def load_config(path: Path) -> ProxyConfig:
             model=p.get("model"),
             model_map=dict(p.get("model_map", {})),
             pricing=pricing,
+            tokenizer=p.get("tokenizer", "heuristic"),
         )
 
     return ProxyConfig(server=server, profiles=profiles)

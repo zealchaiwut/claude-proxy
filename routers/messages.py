@@ -643,7 +643,10 @@ async def count_tokens_passthrough(request: Request) -> Response:
             try:
                 kind, upstream_url, _, _, _ = registry.resolve(profile_name)
                 if kind == "openai":
-                    token_count = _count_tokens_heuristic(body_json)
+                    tokenizer = registry.get_tokenizer(profile_name)
+                    model = body_json.get("model", "gpt-4o")
+                    messages = body_json.get("messages", [])
+                    token_count = tokenizer.count_tokens(messages, model)
                     return Response(
                         content=json.dumps({"input_tokens": token_count}),
                         status_code=200,
@@ -659,7 +662,12 @@ async def count_tokens_passthrough(request: Request) -> Response:
 
     # Legacy path
     if profile_name == "openai":
-        token_count = _count_tokens_heuristic(body_json)
+        from services.tokenizer import get_tokenizer as _get_tok
+
+        tokenizer = _get_tok("heuristic")
+        model = body_json.get("model", "gpt-4o")
+        messages = body_json.get("messages", [])
+        token_count = tokenizer.count_tokens(messages, model)
         return Response(
             content=json.dumps({"input_tokens": token_count}),
             status_code=200,
