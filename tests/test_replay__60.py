@@ -13,7 +13,6 @@ AC coverage:
 import json
 import textwrap
 from io import StringIO
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -214,7 +213,7 @@ async def test_artifact_tokens_match_upstream_usage(tmp_path):
         mock_instance.__aexit__ = AsyncMock(return_value=None)
         MockClient.return_value = mock_instance
 
-        rc = await replay(capture_file, "alpha", config_path=config_path, stdout=StringIO())
+        await replay(capture_file, "alpha", config_path=config_path, stdout=StringIO())
 
     artifact = json.loads((tmp_path / "request_001.replay-alpha.json").read_text())
     # ALPHA_RESPONSE has usage: input=5, output=10
@@ -524,9 +523,7 @@ async def test_unknown_profile_exits_nonzero(tmp_path, capsys):
 
 def test_ccproxy_replay_cli_exits_zero(tmp_path):
     """ac-cli-invocation: 'ccproxy replay <file> --profile <name>' exits 0 on success."""
-    import sys
     from unittest.mock import patch as _patch
-    import asyncio
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(TOML_TWO_PROFILES)
