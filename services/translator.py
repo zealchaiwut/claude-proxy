@@ -21,6 +21,9 @@ from services.sse import anthropic_sse_stream
 
 _log = logging.getLogger(__name__)
 
+# Provider hints that support upstream prompt caching mechanisms.
+_CACHE_CAPABLE_PROVIDERS: frozenset[str] = frozenset({"openai", "deepseek", "together", "fireworks"})
+
 
 def _get_blocks(content: Any) -> list[Any]:
     """Return content as a list of block dicts/objects (empty if content is a plain string)."""
@@ -84,6 +87,14 @@ def _extract_text(content: Any) -> str:
     return ""
 
 
+def _has_cache_control(block: Any) -> bool:
+    """Return True if a block (dict or TextBlock) carries a cache_control marker."""
+    if isinstance(block, dict):
+        return "cache_control" in block
+    extras = getattr(block, "model_extra", {}) or {}
+    return "cache_control" in extras
+
+
 def _map_tools(anthropic_tools: list) -> list[dict]:
     result = []
     for tool in anthropic_tools:
@@ -112,9 +123,13 @@ def _map_tool_choice(anthropic_choice: Any) -> Any:
 def to_openai_request(
     anthropic_req: MessagesRequest,
     model: str,
+    *,
+    prompt_cache: str = "none",
+    cache_provider_hint: str | None = None,
     thinking_mode: str = "disabled",
 ) -> ChatRequest:
     messages: list[dict[str, str]] = []
+    has_cache_marker = False
 
     if anthropic_req.system is not None:
         if isinstance(anthropic_req.system, str):
@@ -123,6 +138,8 @@ def to_openai_request(
             system_text = "".join(
                 block.text for block in anthropic_req.system if isinstance(block, TextBlock)
             )
+            if any(_has_cache_control(b) for b in anthropic_req.system):
+                has_cache_marker = True
         messages.append({"role": "system", "content": system_text})
 
     for turn in anthropic_req.messages:
@@ -180,8 +197,24 @@ def to_openai_request(
         else:
             messages.append({"role": role, "content": _extract_text(raw_content)})
 
-    oai_tools = _map_tools(anthropic_req.tools) if anthropic_req.tools else None
+    if anthropic_req.tools:
+        if any(
+            isinstance(t, dict) and "cache_control" in t
+            for t in anthropic_req.tools
+        ):
+            has_cache_marker = True
+        oai_tools = _map_tools(anthropic_req.tools)
+    else:
+        oai_tools = None
     oai_tool_choice = _map_tool_choice(anthropic_req.tool_choice) if anthropic_req.tool_choice is not None else None
+
+    extra_kwargs: dict[str, Any] = {}
+    if (
+        prompt_cache == "auto"
+        and cache_provider_hint in _CACHE_CAPABLE_PROVIDERS
+        and has_cache_marker
+    ):
+        extra_kwargs["cache_control"] = {"type": "ephemeral"}
 
     req = ChatRequest(
         model=model,
@@ -189,6 +222,7 @@ def to_openai_request(
         max_tokens=anthropic_req.max_tokens,
         tools=oai_tools,
         tool_choice=oai_tool_choice,
+        **extra_kwargs,
     )
 
     # Extended-thinking handling. ChatRequest has extra="allow", so assigning

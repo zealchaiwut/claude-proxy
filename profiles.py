@@ -21,6 +21,9 @@ class ProfileConfig:
     model: str | None = None
     model_map: dict[str, str] = field(default_factory=dict)
     pricing: PricingConfig | None = None
+    tokenizer: str = "heuristic"  # "heuristic" | "openai"
+    prompt_cache: str = "none"  # "none" | "auto"
+    cache_provider_hint: str | None = None  # e.g. "openai", "deepseek"
     # Per-profile override of extended-thinking handling on the OpenAI path.
     # None means "use the global default" (config.Settings.openai_thinking_mode).
     openai_thinking_mode: str | None = None
@@ -59,6 +62,21 @@ class ProfileRegistry:
             return None
         return profile.pricing
 
+    def get_tokenizer(self, name: str):
+        """Return a Tokenizer for the named profile (heuristic by default)."""
+        from services.tokenizer import get_tokenizer as _get_tok
+
+        profile = self._config.profiles.get(name)
+        tok_name = profile.tokenizer if profile is not None else "heuristic"
+        return _get_tok(tok_name)
+
+    def get_cache_config(self, name: str) -> tuple[str, str | None]:
+        """Return (prompt_cache, cache_provider_hint) for the named profile."""
+        profile = self._config.profiles.get(name)
+        if profile is None:
+            return ("none", None)
+        return (profile.prompt_cache, profile.cache_provider_hint)
+
     def get_thinking_mode(self, name: str) -> str | None:
         """Return the profile's openai_thinking_mode override, or None if unset."""
         profile = self._config.profiles.get(name)
@@ -96,6 +114,9 @@ def load_config(path: Path) -> ProxyConfig:
             model=p.get("model"),
             model_map=dict(p.get("model_map", {})),
             pricing=pricing,
+            tokenizer=p.get("tokenizer", "heuristic"),
+            prompt_cache=p.get("prompt_cache", "none"),
+            cache_provider_hint=p.get("cache_provider_hint"),
             openai_thinking_mode=p.get("openai_thinking_mode"),
         )
 

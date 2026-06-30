@@ -1,6 +1,8 @@
 import httpx
 from fastapi import Request, Response
 
+# HTTP-level hop-by-hop headers to strip — JSON body fields (e.g. cache_control) are
+# never touched here; the raw body bytes are forwarded verbatim by proxy_request.
 _HOP_BY_HOP = frozenset({
     "host",
     "connection",

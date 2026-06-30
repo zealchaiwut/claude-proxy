@@ -17,6 +17,10 @@ from services.cost_accounting import (
     compute_est_cost,
     count_input_tokens,
     count_output_tokens,
+    extract_anthropic_cache_usage_from_response,
+    extract_anthropic_cache_usage_from_sse,
+    extract_text_from_sse,
+    extract_upstream_usage_from_sse,
     extract_usage_from_response,
     parse_anthropic_sse_usage,
 )
@@ -204,6 +208,7 @@ async def _dispatch(
                         or model
                         or os.getenv("OPENAI_MODEL", "gpt-4o")
                     )
+                    prompt_cache, cache_hint = registry.get_cache_config(profile_name)
                     thinking_mode = (
                         registry.get_thinking_mode(profile_name)
                         or request.app.state.settings.openai_thinking_mode
@@ -214,6 +219,8 @@ async def _dispatch(
                         openai_base_url=upstream_url,
                         openai_api_key=api_key,
                         openai_model=upstream_model,
+                        prompt_cache=prompt_cache,
+                        cache_provider_hint=cache_hint,
                         thinking_mode=thinking_mode,
                     )
                     return response, {
@@ -222,6 +229,10 @@ async def _dispatch(
                         "upstream_host": _hostname(upstream_url),
                     }
                 # passthrough path (with optional model_map rewrite)
+                # When a rewrite occurs, body_json is re-serialised via json.dumps.
+                # All fields — including cache_control on system/message blocks — are
+                # preserved because json.loads→dict→json.dumps is a lossless round-trip
+                # for every JSON-representable value and preserves insertion order.
                 upstream_model = client_model
                 if model_map and client_model in model_map:
                     upstream_model = model_map[client_model]
@@ -276,6 +287,7 @@ def _attach_logging(
     log_meta: dict,
     body_json: dict,
     pricing: PricingConfig | None,
+    est_input_tokens: int = 0,
 ) -> Response:
     """Attach logging to response; wraps StreamingResponse for streamed requests.
 
@@ -295,6 +307,26 @@ def _attach_logging(
                     yield chunk
             finally:
                 latency_ms = (time.monotonic() - _start) * 1000
+
+                # Compute drift: proxy_estimated - upstream_reported (None if no upstream usage)
+                drift_input = drift_output = None
+                upstream_sse = extract_upstream_usage_from_sse(buf)
+                if upstream_sse:
+                    upstream_in, upstream_out = upstream_sse
+                    sse_text = extract_text_from_sse(buf)
+                    est_out = count_output_tokens(sse_text)
+                    drift_input = est_input_tokens - upstream_in
+                    drift_output = est_out - upstream_out
+
+                # Extract cache metrics based on profile kind
+                _profile_kind = log_meta.get("profile_kind")
+                cache_read = cache_creation = cache_miss = None
+                if _profile_kind == "passthrough":
+                    cache_read, cache_creation = extract_anthropic_cache_usage_from_sse(buf)
+                elif _profile_kind == "openai":
+                    from services.tokenizer import count_messages_tokens
+                    cache_miss = count_messages_tokens(body_json)
+
                 record = request_logger.make_record(
                     profile_name=profile_name,
                     requested_model=requested_model,
@@ -303,6 +335,11 @@ def _attach_logging(
                     status=response.status_code,
                     latency_ms=latency_ms,
                     streamed=True,
+                    token_drift_input=drift_input,
+                    token_drift_output=drift_output,
+                    cache_read_input_tokens=cache_read,
+                    cache_creation_input_tokens=cache_creation,
+                    cache_miss_estimate=cache_miss,
                     **log_meta,
                 )
                 request_logger.emit(record)
@@ -313,6 +350,31 @@ def _attach_logging(
 
         response.body_iterator = _wrapped()
     else:
+        # Compute drift for non-streaming response
+        drift_input = drift_output = None
+        cache_read = cache_creation = cache_miss = None
+        _profile_kind = log_meta.get("profile_kind")
+        try:
+            raw = response.body if hasattr(response, "body") else response.content
+            resp_json = json.loads(raw)
+            upstream_usage = extract_usage_from_response(resp_json)
+            if upstream_usage:
+                upstream_in, upstream_out = upstream_usage
+                text = ""
+                for block in resp_json.get("content", []):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text += block.get("text", "")
+                est_out = count_output_tokens(text)
+                drift_input = est_input_tokens - upstream_in
+                drift_output = est_out - upstream_out
+            if _profile_kind == "passthrough":
+                cache_read, cache_creation = extract_anthropic_cache_usage_from_response(resp_json)
+        except Exception:
+            pass
+        if _profile_kind == "openai":
+            from services.tokenizer import count_messages_tokens
+            cache_miss = count_messages_tokens(body_json)
+
         latency_ms = (time.monotonic() - start) * 1000
         record = request_logger.make_record(
             profile_name=profile_name,
@@ -322,6 +384,11 @@ def _attach_logging(
             status=response.status_code,
             latency_ms=latency_ms,
             streamed=False,
+            token_drift_input=drift_input,
+            token_drift_output=drift_output,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_creation,
+            cache_miss_estimate=cache_miss,
             **log_meta,
         )
         request_logger.emit(record)
@@ -335,7 +402,10 @@ def _attach_metrics(
     response: Response,
     *,
     profile_name: str,
+    profile_kind: str | None = None,
     start: float,
+    est_input_tokens: int = 0,
+    body_json: dict | None = None,
 ) -> Response:
     """Record a sample in the metrics collector after the response is ready/consumed."""
     if isinstance(response, StreamingResponse):
@@ -343,15 +413,48 @@ def _attach_metrics(
         _start = start
 
         async def _wrapped():
+            buf = b""
             try:
                 async for chunk in original:
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode()
+                    buf += chunk
                     yield chunk
             finally:
                 latency_ms = (time.monotonic() - _start) * 1000
+                input_tokens = output_tokens = 0
+                cost_usd = 0.0
+                drift_input = drift_output = None
+                cache_read = cache_creation = cache_miss = None
+
+                upstream_sse = extract_upstream_usage_from_sse(buf)
+                if upstream_sse:
+                    input_tokens, output_tokens = upstream_sse
+                    cost_usd = input_tokens * _COST_PER_INPUT_TOKEN + output_tokens * _COST_PER_OUTPUT_TOKEN
+                    sse_text = extract_text_from_sse(buf)
+                    est_out = count_output_tokens(sse_text)
+                    drift_input = est_input_tokens - input_tokens
+                    drift_output = est_out - output_tokens
+
+                if profile_kind == "passthrough":
+                    cache_read, cache_creation = extract_anthropic_cache_usage_from_sse(buf)
+                elif profile_kind == "openai" and body_json is not None:
+                    from services.tokenizer import count_messages_tokens
+                    cache_miss = count_messages_tokens(body_json)
+
                 collector.record(
                     profile=profile_name,
+                    profile_kind=profile_kind,
                     status=response.status_code,
                     latency_ms=latency_ms,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost_usd=cost_usd,
+                    token_drift_input=drift_input,
+                    token_drift_output=drift_output,
+                    cache_read_input_tokens=cache_read,
+                    cache_creation_input_tokens=cache_creation,
+                    cache_miss_estimate=cache_miss,
                 )
 
         response.body_iterator = _wrapped()
@@ -359,21 +462,46 @@ def _attach_metrics(
         latency_ms = (time.monotonic() - start) * 1000
         input_tokens = output_tokens = 0
         cost_usd = 0.0
+        drift_input = drift_output = None
+        cache_read = cache_creation = cache_miss = None
         try:
             body = json.loads(response.body)
-            usage = body.get("usage") or {}
-            input_tokens = int(usage.get("input_tokens") or 0)
-            output_tokens = int(usage.get("output_tokens") or 0)
-            cost_usd = input_tokens * _COST_PER_INPUT_TOKEN + output_tokens * _COST_PER_OUTPUT_TOKEN
+            upstream_usage = extract_usage_from_response(body)
+            if upstream_usage:
+                input_tokens, output_tokens = upstream_usage
+                cost_usd = input_tokens * _COST_PER_INPUT_TOKEN + output_tokens * _COST_PER_OUTPUT_TOKEN
+                text = ""
+                for block in body.get("content", []):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text += block.get("text", "")
+                est_out = count_output_tokens(text)
+                drift_input = est_input_tokens - input_tokens
+                drift_output = est_out - output_tokens
+            else:
+                usage = body.get("usage") or {}
+                input_tokens = int(usage.get("input_tokens") or 0)
+                output_tokens = int(usage.get("output_tokens") or 0)
+                cost_usd = input_tokens * _COST_PER_INPUT_TOKEN + output_tokens * _COST_PER_OUTPUT_TOKEN
+            if profile_kind == "passthrough":
+                cache_read, cache_creation = extract_anthropic_cache_usage_from_response(body)
         except Exception:
             pass
+        if profile_kind == "openai" and body_json is not None:
+            from services.tokenizer import count_messages_tokens
+            cache_miss = count_messages_tokens(body_json)
         collector.record(
             profile=profile_name,
+            profile_kind=profile_kind,
             status=response.status_code,
             latency_ms=latency_ms,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_usd=cost_usd,
+            token_drift_input=drift_input,
+            token_drift_output=drift_output,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_creation,
+            cache_miss_estimate=cache_miss,
         )
     return response
 
@@ -392,6 +520,7 @@ async def messages_passthrough(request: Request) -> Response:
     profile_name = _get_profile_name(request)
     requested_model = body_json.get("model", "")
     pricing = _get_profile_pricing(request, profile_name)
+    est_input_tokens = count_input_tokens(body_json)
 
     correlation = {
         "run_id": request.headers.get("x-ccproxy-run") or None,
@@ -418,6 +547,7 @@ async def messages_passthrough(request: Request) -> Response:
             log_meta={**log_meta, **correlation},
             body_json=body_json,
             pricing=pricing,
+            est_input_tokens=est_input_tokens,
         )
     else:
         # No RequestLogger wired — still emit cost accounting records.
@@ -441,7 +571,15 @@ async def messages_passthrough(request: Request) -> Response:
 
     metrics: MetricsCollector | None = getattr(request.app.state, "metrics_collector", None)
     if metrics is not None:
-        response = _attach_metrics(metrics, response, profile_name=profile_name, start=start)
+        response = _attach_metrics(
+            metrics,
+            response,
+            profile_name=profile_name,
+            profile_kind=log_meta.get("profile_kind"),
+            start=start,
+            est_input_tokens=est_input_tokens,
+            body_json=body_json,
+        )
 
     return response
 
@@ -461,6 +599,8 @@ async def _handle_openai_mode(
     openai_base_url: str | None = None,
     openai_api_key: str | None = None,
     openai_model: str | None = None,
+    prompt_cache: str = "none",
+    cache_provider_hint: str | None = None,
     thinking_mode: str = "disabled",
 ) -> Response:
     # Fall back to env vars when values not supplied (legacy mode)
@@ -494,11 +634,17 @@ async def _handle_openai_mode(
             openai_api_key,
             openai_model,
             tool_mode=tool_mode,
+            prompt_cache=prompt_cache,
+            cache_provider_hint=cache_provider_hint,
             thinking_mode=thinking_mode,
         )
 
     openai_req = to_openai_request(
-        anthropic_req, model=openai_model, thinking_mode=thinking_mode
+        anthropic_req,
+        model=openai_model,
+        prompt_cache=prompt_cache,
+        cache_provider_hint=cache_provider_hint,
+        thinking_mode=thinking_mode,
     )
     upstream_resp = await client.post(
         f"{openai_base_url}/chat/completions",
@@ -551,13 +697,19 @@ async def _handle_openai_stream(
     openai_model: str,
     *,
     tool_mode: str = "native",
+    prompt_cache: str = "none",
+    cache_provider_hint: str | None = None,
     thinking_mode: str = "disabled",
 ) -> Response:
     """Return a live StreamingResponse translating OpenAI SSE to Anthropic SSE."""
     from schemas.openai import ChatRequest
 
     openai_req = to_openai_request(
-        anthropic_req, model=openai_model, thinking_mode=thinking_mode
+        anthropic_req,
+        model=openai_model,
+        prompt_cache=prompt_cache,
+        cache_provider_hint=cache_provider_hint,
+        thinking_mode=thinking_mode,
     )
     stream_req = ChatRequest(
         model=openai_model,
@@ -659,7 +811,10 @@ async def count_tokens_passthrough(request: Request) -> Response:
             try:
                 kind, upstream_url, _, _, _ = registry.resolve(profile_name)
                 if kind == "openai":
-                    token_count = _count_tokens_heuristic(body_json)
+                    tokenizer = registry.get_tokenizer(profile_name)
+                    model = body_json.get("model", "gpt-4o")
+                    messages = body_json.get("messages", [])
+                    token_count = tokenizer.count_tokens(messages, model)
                     return Response(
                         content=json.dumps({"input_tokens": token_count}),
                         status_code=200,
@@ -675,7 +830,12 @@ async def count_tokens_passthrough(request: Request) -> Response:
 
     # Legacy path
     if profile_name == "openai":
-        token_count = _count_tokens_heuristic(body_json)
+        from services.tokenizer import get_tokenizer as _get_tok
+
+        tokenizer = _get_tok("openai")
+        model = body_json.get("model", "gpt-4o")
+        messages = body_json.get("messages", [])
+        token_count = tokenizer.count_tokens(messages, model)
         return Response(
             content=json.dumps({"input_tokens": token_count}),
             status_code=200,
