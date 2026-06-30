@@ -7,8 +7,10 @@ from fastapi import Depends, FastAPI
 from config import Settings, get_settings
 from profiles import ProfileRegistry, get_or_load_config
 from routers.messages import router as messages_router
+from routers.metrics import router as metrics_router
 from routers.models import router as models_router
 from routers.passthrough import router as passthrough_router
+from services.metrics_collector import MetricsCollector
 from services.request_logger import RequestLogger
 
 
@@ -23,6 +25,7 @@ async def lifespan(app: FastAPI):
     app.state.profile_registry = ProfileRegistry(proxy_config)
 
     app.state.request_logger = RequestLogger()
+    app.state.metrics_collector = MetricsCollector()
 
     client = httpx.AsyncClient(timeout=httpx.Timeout(settings.upstream_read_timeout))
     app.state.http_client = client
@@ -32,6 +35,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(messages_router)
+app.include_router(metrics_router)
 app.include_router(models_router)
 app.include_router(passthrough_router)
 

@@ -11,6 +11,7 @@ from profiles import ProfileRegistry, resolve_profile_name
 from routers._proxy_utils import filter_headers, proxy_request
 from schemas.anthropic import MessagesRequest, TextBlock
 from schemas.openai import ChatResponse
+from services.metrics_collector import MetricsCollector, _COST_PER_INPUT_TOKEN, _COST_PER_OUTPUT_TOKEN
 from services.request_logger import RequestLogger
 from services.translator import from_openai_response, live_stream_to_anthropic_sse, to_openai_request
 
@@ -223,6 +224,54 @@ def _attach_logging(
     return response
 
 
+def _attach_metrics(
+    collector: MetricsCollector,
+    response: Response,
+    *,
+    profile_name: str,
+    start: float,
+) -> Response:
+    """Record a sample in the metrics collector after the response is ready/consumed."""
+    if isinstance(response, StreamingResponse):
+        original = response.body_iterator
+        _start = start
+
+        async def _wrapped():
+            try:
+                async for chunk in original:
+                    yield chunk
+            finally:
+                latency_ms = (time.monotonic() - _start) * 1000
+                collector.record(
+                    profile=profile_name,
+                    status=response.status_code,
+                    latency_ms=latency_ms,
+                )
+
+        response.body_iterator = _wrapped()
+    else:
+        latency_ms = (time.monotonic() - start) * 1000
+        input_tokens = output_tokens = 0
+        cost_usd = 0.0
+        try:
+            body = json.loads(response.body)
+            usage = body.get("usage") or {}
+            input_tokens = int(usage.get("input_tokens") or 0)
+            output_tokens = int(usage.get("output_tokens") or 0)
+            cost_usd = input_tokens * _COST_PER_INPUT_TOKEN + output_tokens * _COST_PER_OUTPUT_TOKEN
+        except Exception:
+            pass
+        collector.record(
+            profile=profile_name,
+            status=response.status_code,
+            latency_ms=latency_ms,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+        )
+    return response
+
+
 @router.post("/v1/messages")
 async def messages_passthrough(request: Request) -> Response:
     start = time.monotonic()
@@ -257,6 +306,10 @@ async def messages_passthrough(request: Request) -> Response:
             start=start,
             log_meta={**log_meta, **correlation},
         )
+
+    metrics: MetricsCollector | None = getattr(request.app.state, "metrics_collector", None)
+    if metrics is not None:
+        response = _attach_metrics(metrics, response, profile_name=profile_name, start=start)
 
     return response
 
