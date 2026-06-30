@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     # Global default for extended-thinking handling on the OpenAI path.
     # "disabled" | "forward" | "strip". Profiles may override per-profile.
     openai_thinking_mode: str = "disabled"
+    ready_cache_ttl: float = 5.0
 
 
 def get_settings() -> Settings:

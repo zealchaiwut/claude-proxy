@@ -2,10 +2,57 @@
 
 A lightweight HTTP proxy for the Anthropic API, designed for use with Claude Code and other Anthropic API clients.
 
+## Install
+
+Install globally as a command-line tool using `uv` or `pipx`:
+
+```bash
+# with uv (recommended)
+uv tool install .
+
+# with pipx
+pipx install .
+```
+
+After install, both `claude-proxy` and `ccswitch` are on your `$PATH`.
+
 ## Quick Start
 
 ```bash
-pip install -e .
+# 1. Copy the example config
+cp config.example.toml config.toml
+
+# 2. Set your API key
+export ANTHROPIC_API_KEY=<your-key>
+
+# 3. Start the proxy
+claude-proxy
+```
+
+The server binds to the `host` and `port` defined in `config.toml` (`127.0.0.1:8788` by default).
+
+### First-run verification
+
+```bash
+curl http://127.0.0.1:8788/health
+# {"status":"ok","upstream":"https://api.anthropic.com"}
+```
+
+### Environment variables
+
+All variables are optional — `config.toml` takes precedence for `[server]` settings.
+Copy `.env.example` to `.env` for a template:
+
+```bash
+cp .env.example .env
+```
+
+See the **Configuration** table below for the full list of recognised variables.
+
+### Development install
+
+```bash
+pip install -e ".[dev]"
 uvicorn main:app --host 127.0.0.1 --port 8788
 ```
 
@@ -244,6 +291,84 @@ A request tagged with all three headers produces a JSONL record like:
   "ticket": "PROJ-42"
 }
 ```
+
+## Service Installation
+
+Run `claude-proxy` as a persistent background service that starts automatically
+on login and restarts after failures.
+
+### macOS (launchd)
+
+```bash
+python scripts/install_service.py
+```
+
+This installs a launchd user agent that starts at login and restarts the proxy
+when it crashes. Credentials are loaded from `~/.config/claude-proxy/env` —
+never stored in the service unit.
+
+**Check status**
+
+```bash
+launchctl list com.zealchaiwut.claude-proxy
+```
+
+**View logs**
+
+```bash
+tail -f ~/Library/Logs/claude-proxy/claude-proxy.log
+tail -f ~/Library/Logs/claude-proxy/claude-proxy.err
+```
+
+**Uninstall**
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.zealchaiwut.claude-proxy.plist
+rm ~/Library/LaunchAgents/com.zealchaiwut.claude-proxy.plist
+```
+
+### Linux (systemd user unit)
+
+```bash
+python scripts/install_service.py
+```
+
+This installs a systemd user unit that starts automatically and restarts on
+failure. Credentials are loaded from `~/.config/claude-proxy/env` via
+`EnvironmentFile=` — never stored in the unit.
+
+**Check status**
+
+```bash
+systemctl --user status claude-proxy
+```
+
+**View logs**
+
+```bash
+journalctl --user -u claude-proxy -f
+```
+
+**Uninstall**
+
+```bash
+systemctl --user disable --now claude-proxy
+rm ~/.config/systemd/user/claude-proxy.service
+systemctl --user daemon-reload
+```
+
+### Env file
+
+Both platforms read credentials from `~/.config/claude-proxy/env`.
+The installer creates a template if the file does not already exist:
+
+```bash
+# ~/.config/claude-proxy/env
+ANTHROPIC_API_KEY=sk-ant-...
+CCPROXY_PROFILE=anthropic
+```
+
+This file is never committed to version control — it lives only on the host.
 
 ## Running Tests
 

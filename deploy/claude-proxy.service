@@ -1,0 +1,22 @@
+[Unit]
+Description=claude-proxy Anthropic API proxy
+Documentation=https://github.com/zealchaiwut/claude-proxy
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={{UVICORN}} main:app --host 127.0.0.1 --port 8788
+WorkingDirectory={{INSTALL_DIR}}
+
+# Secrets are loaded from the env file below — no credentials stored in this unit.
+EnvironmentFile=~/.config/claude-proxy/env
+
+Restart=on-failure
+RestartSec=5s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=claude-proxy
+
+[Install]
+WantedBy=default.target
