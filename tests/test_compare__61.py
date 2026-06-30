@@ -9,10 +9,8 @@ AC coverage:
 import asyncio
 import json
 from io import StringIO
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 from ccproxy import cmd_compare, _replay_profile
 
