@@ -17,6 +17,8 @@ from services.cost_accounting import (
     compute_est_cost,
     count_input_tokens,
     count_output_tokens,
+    extract_text_from_sse,
+    extract_upstream_usage_from_sse,
     extract_usage_from_response,
     parse_anthropic_sse_usage,
 )
@@ -267,6 +269,7 @@ def _attach_logging(
     log_meta: dict,
     body_json: dict,
     pricing: PricingConfig | None,
+    est_input_tokens: int = 0,
 ) -> Response:
     """Attach logging to response; wraps StreamingResponse for streamed requests.
 
@@ -286,6 +289,17 @@ def _attach_logging(
                     yield chunk
             finally:
                 latency_ms = (time.monotonic() - _start) * 1000
+
+                # Compute drift: proxy_estimated - upstream_reported (None if no upstream usage)
+                drift_input = drift_output = None
+                upstream_sse = extract_upstream_usage_from_sse(buf)
+                if upstream_sse:
+                    upstream_in, upstream_out = upstream_sse
+                    sse_text = extract_text_from_sse(buf)
+                    est_out = count_output_tokens(sse_text)
+                    drift_input = est_input_tokens - upstream_in
+                    drift_output = est_out - upstream_out
+
                 record = request_logger.make_record(
                     profile_name=profile_name,
                     requested_model=requested_model,
@@ -294,6 +308,8 @@ def _attach_logging(
                     status=response.status_code,
                     latency_ms=latency_ms,
                     streamed=True,
+                    token_drift_input=drift_input,
+                    token_drift_output=drift_output,
                     **log_meta,
                 )
                 request_logger.emit(record)
@@ -304,6 +320,24 @@ def _attach_logging(
 
         response.body_iterator = _wrapped()
     else:
+        # Compute drift for non-streaming response
+        drift_input = drift_output = None
+        try:
+            raw = response.body if hasattr(response, "body") else response.content
+            resp_json = json.loads(raw)
+            upstream_usage = extract_usage_from_response(resp_json)
+            if upstream_usage:
+                upstream_in, upstream_out = upstream_usage
+                text = ""
+                for block in resp_json.get("content", []):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text += block.get("text", "")
+                est_out = count_output_tokens(text)
+                drift_input = est_input_tokens - upstream_in
+                drift_output = est_out - upstream_out
+        except Exception:
+            pass
+
         latency_ms = (time.monotonic() - start) * 1000
         record = request_logger.make_record(
             profile_name=profile_name,
@@ -313,6 +347,8 @@ def _attach_logging(
             status=response.status_code,
             latency_ms=latency_ms,
             streamed=False,
+            token_drift_input=drift_input,
+            token_drift_output=drift_output,
             **log_meta,
         )
         request_logger.emit(record)
@@ -327,6 +363,8 @@ def _attach_metrics(
     *,
     profile_name: str,
     start: float,
+    est_input_tokens: int = 0,
+    body_json: dict | None = None,
 ) -> Response:
     """Record a sample in the metrics collector after the response is ready/consumed."""
     if isinstance(response, StreamingResponse):
@@ -334,15 +372,37 @@ def _attach_metrics(
         _start = start
 
         async def _wrapped():
+            buf = b""
             try:
                 async for chunk in original:
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode()
+                    buf += chunk
                     yield chunk
             finally:
                 latency_ms = (time.monotonic() - _start) * 1000
+                input_tokens = output_tokens = 0
+                cost_usd = 0.0
+                drift_input = drift_output = None
+
+                upstream_sse = extract_upstream_usage_from_sse(buf)
+                if upstream_sse:
+                    input_tokens, output_tokens = upstream_sse
+                    cost_usd = input_tokens * _COST_PER_INPUT_TOKEN + output_tokens * _COST_PER_OUTPUT_TOKEN
+                    sse_text = extract_text_from_sse(buf)
+                    est_out = count_output_tokens(sse_text)
+                    drift_input = est_input_tokens - input_tokens
+                    drift_output = est_out - output_tokens
+
                 collector.record(
                     profile=profile_name,
                     status=response.status_code,
                     latency_ms=latency_ms,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost_usd=cost_usd,
+                    token_drift_input=drift_input,
+                    token_drift_output=drift_output,
                 )
 
         response.body_iterator = _wrapped()
@@ -350,12 +410,25 @@ def _attach_metrics(
         latency_ms = (time.monotonic() - start) * 1000
         input_tokens = output_tokens = 0
         cost_usd = 0.0
+        drift_input = drift_output = None
         try:
             body = json.loads(response.body)
-            usage = body.get("usage") or {}
-            input_tokens = int(usage.get("input_tokens") or 0)
-            output_tokens = int(usage.get("output_tokens") or 0)
-            cost_usd = input_tokens * _COST_PER_INPUT_TOKEN + output_tokens * _COST_PER_OUTPUT_TOKEN
+            upstream_usage = extract_usage_from_response(body)
+            if upstream_usage:
+                input_tokens, output_tokens = upstream_usage
+                cost_usd = input_tokens * _COST_PER_INPUT_TOKEN + output_tokens * _COST_PER_OUTPUT_TOKEN
+                text = ""
+                for block in body.get("content", []):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text += block.get("text", "")
+                est_out = count_output_tokens(text)
+                drift_input = est_input_tokens - input_tokens
+                drift_output = est_out - output_tokens
+            else:
+                usage = body.get("usage") or {}
+                input_tokens = int(usage.get("input_tokens") or 0)
+                output_tokens = int(usage.get("output_tokens") or 0)
+                cost_usd = input_tokens * _COST_PER_INPUT_TOKEN + output_tokens * _COST_PER_OUTPUT_TOKEN
         except Exception:
             pass
         collector.record(
@@ -365,6 +438,8 @@ def _attach_metrics(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_usd=cost_usd,
+            token_drift_input=drift_input,
+            token_drift_output=drift_output,
         )
     return response
 
@@ -383,6 +458,7 @@ async def messages_passthrough(request: Request) -> Response:
     profile_name = _get_profile_name(request)
     requested_model = body_json.get("model", "")
     pricing = _get_profile_pricing(request, profile_name)
+    est_input_tokens = count_input_tokens(body_json)
 
     correlation = {
         "run_id": request.headers.get("x-ccproxy-run") or None,
@@ -409,6 +485,7 @@ async def messages_passthrough(request: Request) -> Response:
             log_meta={**log_meta, **correlation},
             body_json=body_json,
             pricing=pricing,
+            est_input_tokens=est_input_tokens,
         )
     else:
         # No RequestLogger wired — still emit cost accounting records.
@@ -432,7 +509,14 @@ async def messages_passthrough(request: Request) -> Response:
 
     metrics: MetricsCollector | None = getattr(request.app.state, "metrics_collector", None)
     if metrics is not None:
-        response = _attach_metrics(metrics, response, profile_name=profile_name, start=start)
+        response = _attach_metrics(
+            metrics,
+            response,
+            profile_name=profile_name,
+            start=start,
+            est_input_tokens=est_input_tokens,
+            body_json=body_json,
+        )
 
     return response
 

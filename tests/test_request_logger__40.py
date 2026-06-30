@@ -32,7 +32,7 @@ CLIENT_MODEL = "claude-haiku-4-5-20251001"
 OPENAI_MODEL = "gpt-4o"
 
 _SENSITIVE_FIELD_PATTERN = re.compile(
-    r"api_key|authorization|secret|token|bearer|password|body|content|messages|prompt|header",
+    r"api_key|authorization|secret|token(?!_drift)|bearer|password|body|content|messages|prompt|header",
     re.IGNORECASE,
 )
 
