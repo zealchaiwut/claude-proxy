@@ -1,6 +1,7 @@
 """Tests for issue #11: OpenAI proxy mode behind CCPROXY_PROFILE env switch."""
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
@@ -78,8 +79,39 @@ def _make_openai_mock_client(
         mock_resp.headers = {"content-type": "application/json"}
         return mock_resp
 
+    def _make_sse_chunks_from_content(text: str) -> list[bytes]:
+        chunks = [
+            f'data: {json.dumps({"choices":[{"delta":{"content":text},"finish_reason":None}]})}\n\n'.encode(),
+            f'data: {json.dumps({"choices":[{"delta":{},"finish_reason":"stop"}]})}\n\n'.encode(),
+            f'data: {json.dumps({"choices":[{"delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":5}})}\n\n'.encode(),
+            b"data: [DONE]\n\n",
+        ]
+        return chunks
+
+    class _StreamResp:
+        status_code = status
+        headers = httpx.Headers({"content-type": "text/event-stream"})
+
+        async def aiter_bytes(self):
+            # Extract text from the non-stream OPENAI_RESPONSE for SSE simulation
+            try:
+                parsed = json.loads(response_body)
+                text = parsed["choices"][0]["message"]["content"] or ""
+            except Exception:
+                text = ""
+            for chunk in _make_sse_chunks_from_content(text):
+                yield chunk
+
+    @contextlib.asynccontextmanager
+    async def _stream(method, url, *, content, headers, **kwargs):
+        captured["stream_url"] = url
+        captured["stream_content"] = content
+        captured["stream_headers"] = {k.lower(): v for k, v in dict(headers).items()}
+        yield _StreamResp()
+
     client = MagicMock()
     client.post = _post
+    client.stream = _stream
     client.aclose = AsyncMock()
     return client, captured
 
@@ -248,11 +280,12 @@ def test_openai_request_uses_configured_model(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# AC (c): stream=true in openai mode returns single complete message, no crash
+# AC (c) [updated for M2/issue#19]: stream=true in openai mode returns live SSE
+# The M1 "force non-stream" fallback is removed; stream=true now returns text/event-stream.
 # ---------------------------------------------------------------------------
 
-def test_stream_true_openai_mode_returns_complete_message(monkeypatch):
-    """AC(c): stream=true in openai mode returns single complete message (no SSE)."""
+def test_stream_true_openai_mode_returns_sse_response(monkeypatch):
+    """AC(c) M2: stream=true in openai mode returns text/event-stream (M1 fallback removed)."""
     monkeypatch.setenv("CCPROXY_PROFILE", "openai")
     monkeypatch.setenv("OPENAI_BASE_URL", OPENAI_BASE)
     monkeypatch.setenv("OPENAI_API_KEY", OPENAI_KEY)
@@ -261,20 +294,19 @@ def test_stream_true_openai_mode_returns_complete_message(monkeypatch):
     mock_client, captured = _make_openai_mock_client(response_body=OPENAI_RESPONSE)
     with TestClient(app) as tc:
         _setup_openai(mock_client)
-        resp = tc.post(
-            "/v1/messages",
+        with tc.stream(
+            "POST", "/v1/messages",
             content=ANTHROPIC_REQUEST_WITH_STREAM,
             headers={"content-type": "application/json"},
-        )
+        ) as resp:
+            assert "text/event-stream" in resp.headers.get("content-type", "")
+            resp.read()
 
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["role"] == "assistant"
-    assert body["content"][0]["type"] == "text"
 
 
-def test_stream_true_openai_mode_no_sse(monkeypatch):
-    """AC(c): stream=true in openai mode does NOT return SSE (content-type is not event-stream)."""
+def test_stream_true_openai_mode_returns_event_stream_content_type(monkeypatch):
+    """AC(c) M2: stream=true in openai mode returns Content-Type: text/event-stream."""
     monkeypatch.setenv("CCPROXY_PROFILE", "openai")
     monkeypatch.setenv("OPENAI_BASE_URL", OPENAI_BASE)
     monkeypatch.setenv("OPENAI_API_KEY", OPENAI_KEY)
@@ -283,17 +315,19 @@ def test_stream_true_openai_mode_no_sse(monkeypatch):
     mock_client, _ = _make_openai_mock_client(response_body=OPENAI_RESPONSE)
     with TestClient(app) as tc:
         _setup_openai(mock_client)
-        resp = tc.post(
-            "/v1/messages",
+        with tc.stream(
+            "POST", "/v1/messages",
             content=ANTHROPIC_REQUEST_WITH_STREAM,
             headers={"content-type": "application/json"},
-        )
+        ) as resp:
+            ct = resp.headers.get("content-type", "")
+            resp.read()
 
-    assert "text/event-stream" not in resp.headers.get("content-type", "")
+    assert "text/event-stream" in ct
 
 
-def test_stream_true_openai_upstream_receives_non_streaming_request(monkeypatch):
-    """AC(c): the upstream OpenAI call does NOT set stream=true."""
+def test_stream_true_openai_upstream_receives_streaming_request(monkeypatch):
+    """AC(c) M2: the upstream OpenAI call has stream=true (M1 non-stream fallback removed)."""
     monkeypatch.setenv("CCPROXY_PROFILE", "openai")
     monkeypatch.setenv("OPENAI_BASE_URL", OPENAI_BASE)
     monkeypatch.setenv("OPENAI_API_KEY", OPENAI_KEY)
@@ -302,14 +336,15 @@ def test_stream_true_openai_upstream_receives_non_streaming_request(monkeypatch)
     mock_client, captured = _make_openai_mock_client(response_body=OPENAI_RESPONSE)
     with TestClient(app) as tc:
         _setup_openai(mock_client)
-        tc.post(
-            "/v1/messages",
+        with tc.stream(
+            "POST", "/v1/messages",
             content=ANTHROPIC_REQUEST_WITH_STREAM,
             headers={"content-type": "application/json"},
-        )
+        ) as resp:
+            resp.read()
 
-    sent_body = json.loads(captured["content"])
-    assert sent_body.get("stream", False) is False
+    sent_body = json.loads(captured["stream_content"])
+    assert sent_body.get("stream") is True
 
 
 # ---------------------------------------------------------------------------
