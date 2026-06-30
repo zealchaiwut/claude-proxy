@@ -3,7 +3,6 @@ import asyncio
 import json
 from typing import AsyncIterator
 
-import pytest
 
 from services.openai_sse_consumer import consume_openai_sse_stream, ContentEvent, FinishEvent, UsageEvent
 
