@@ -1,24 +1,13 @@
 import httpx
 from fastapi import APIRouter, Request, Response
 
-router = APIRouter()
+from routers._proxy_utils import _HOP_BY_HOP, filter_headers, proxy_request
 
-_HOP_BY_HOP = frozenset({
-    "host",
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-    "content-length",
-})
+router = APIRouter()
 
 
 def _filter_headers(headers) -> dict[str, str]:
-    return {k: v for k, v in headers.items() if k.lower() not in _HOP_BY_HOP}
+    return filter_headers(headers)
 
 
 @router.post("/v1/messages")
@@ -39,4 +28,14 @@ async def messages_passthrough(request: Request) -> Response:
         content=upstream_resp.content,
         status_code=upstream_resp.status_code,
         headers=_filter_headers(upstream_resp.headers),
+    )
+
+
+@router.post("/v1/messages/count_tokens")
+async def count_tokens_passthrough(request: Request) -> Response:
+    settings = request.app.state.settings
+    return await proxy_request(
+        request,
+        f"{settings.upstream_base_url}/v1/messages/count_tokens",
+        method="POST",
     )
