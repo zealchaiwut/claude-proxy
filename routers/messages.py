@@ -206,12 +206,15 @@ async def _dispatch(
                         or model
                         or os.getenv("OPENAI_MODEL", "gpt-4o")
                     )
+                    prompt_cache, cache_hint = registry.get_cache_config(profile_name)
                     response = await _handle_openai_mode(
                         request,
                         body_json,
                         openai_base_url=upstream_url,
                         openai_api_key=api_key,
                         openai_model=upstream_model,
+                        prompt_cache=prompt_cache,
+                        cache_provider_hint=cache_hint,
                     )
                     return response, {
                         "profile_kind": "openai",
@@ -536,6 +539,8 @@ async def _handle_openai_mode(
     openai_base_url: str | None = None,
     openai_api_key: str | None = None,
     openai_model: str | None = None,
+    prompt_cache: str = "none",
+    cache_provider_hint: str | None = None,
 ) -> Response:
     # Fall back to env vars when values not supplied (legacy mode)
     if openai_base_url is None:
@@ -568,9 +573,16 @@ async def _handle_openai_mode(
             openai_api_key,
             openai_model,
             tool_mode=tool_mode,
+            prompt_cache=prompt_cache,
+            cache_provider_hint=cache_provider_hint,
         )
 
-    openai_req = to_openai_request(anthropic_req, model=openai_model)
+    openai_req = to_openai_request(
+        anthropic_req,
+        model=openai_model,
+        prompt_cache=prompt_cache,
+        cache_provider_hint=cache_provider_hint,
+    )
     upstream_resp = await client.post(
         f"{openai_base_url}/chat/completions",
         content=openai_req.model_dump_json().encode(),
@@ -622,11 +634,18 @@ async def _handle_openai_stream(
     openai_model: str,
     *,
     tool_mode: str = "native",
+    prompt_cache: str = "none",
+    cache_provider_hint: str | None = None,
 ) -> Response:
     """Return a live StreamingResponse translating OpenAI SSE to Anthropic SSE."""
     from schemas.openai import ChatRequest
 
-    openai_req = to_openai_request(anthropic_req, model=openai_model)
+    openai_req = to_openai_request(
+        anthropic_req,
+        model=openai_model,
+        prompt_cache=prompt_cache,
+        cache_provider_hint=cache_provider_hint,
+    )
     req_body = (
         ChatRequest(
             model=openai_model,

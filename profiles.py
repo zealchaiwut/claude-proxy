@@ -22,6 +22,8 @@ class ProfileConfig:
     model_map: dict[str, str] = field(default_factory=dict)
     pricing: PricingConfig | None = None
     tokenizer: str = "heuristic"  # "heuristic" | "openai"
+    prompt_cache: str = "none"  # "none" | "auto"
+    cache_provider_hint: str | None = None  # e.g. "openai", "deepseek"
 
 
 @dataclass
@@ -65,6 +67,13 @@ class ProfileRegistry:
         tok_name = profile.tokenizer if profile is not None else "heuristic"
         return _get_tok(tok_name)
 
+    def get_cache_config(self, name: str) -> tuple[str, str | None]:
+        """Return (prompt_cache, cache_provider_hint) for the named profile."""
+        profile = self._config.profiles.get(name)
+        if profile is None:
+            return ("none", None)
+        return (profile.prompt_cache, profile.cache_provider_hint)
+
 
 def load_config(path: Path) -> ProxyConfig:
     """Parse a config.toml file into a ProxyConfig."""
@@ -96,6 +105,8 @@ def load_config(path: Path) -> ProxyConfig:
             model_map=dict(p.get("model_map", {})),
             pricing=pricing,
             tokenizer=p.get("tokenizer", "heuristic"),
+            prompt_cache=p.get("prompt_cache", "none"),
+            cache_provider_hint=p.get("cache_provider_hint"),
         )
 
     return ProxyConfig(server=server, profiles=profiles)
