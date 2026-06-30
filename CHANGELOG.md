@@ -3,6 +3,11 @@
 Per-sprint changelog for claude-proxy. Entries are written by the documentor when a
 sprint finishes. Dated per-sprint files live under [docs/changelog/](docs/changelog/).
 
+## Sprint 2
+
+- #9: Add translator service: Anthropic → OpenAI request mapping
+- #11: Add OpenAI proxy mode behind CCPROXY_PROFILE env switch
+
 ## Sprint 1
 
 - #1: Create claude-proxy FastAPI skeleton with health endpoint
