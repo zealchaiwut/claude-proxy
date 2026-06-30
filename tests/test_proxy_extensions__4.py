@@ -3,7 +3,6 @@ import json
 from unittest.mock import MagicMock, AsyncMock
 
 import httpx
-import pytest
 from fastapi.testclient import TestClient
 
 from main import app

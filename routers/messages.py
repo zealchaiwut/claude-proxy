@@ -1,7 +1,7 @@
 import httpx
 from fastapi import APIRouter, Request, Response
 
-from routers._proxy_utils import _HOP_BY_HOP, filter_headers, proxy_request
+from routers._proxy_utils import filter_headers, proxy_request
 
 router = APIRouter()
 
