@@ -7,6 +7,8 @@ from fastapi import Depends, FastAPI
 
 from config import Settings, get_settings
 from routers.messages import router as messages_router
+from routers.models import router as models_router
+from routers.passthrough import router as passthrough_router
 
 
 @asynccontextmanager
@@ -21,6 +23,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(messages_router)
+app.include_router(models_router)
+app.include_router(passthrough_router)
 
 
 @app.get("/health")
