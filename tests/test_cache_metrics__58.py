@@ -119,7 +119,7 @@ def _setup(
 def _read_record(capture: io.StringIO) -> dict:
     capture.seek(0)
     lines = [ln.strip() for ln in capture.readlines() if ln.strip()]
-    assert len(lines) >= 1, f"No log records captured"
+    assert len(lines) >= 1, "No log records captured"
     return json.loads(lines[0])
 
 
