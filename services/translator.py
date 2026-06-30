@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from schemas.anthropic import MessagesRequest, TextBlock
-from schemas.openai import ChatRequest
+from schemas.anthropic import MessagesRequest, MessagesResponse, TextBlock
+from schemas.anthropic import Usage as AnthropicUsage
+from schemas.openai import ChatRequest, ChatResponse
 
 
 def _extract_text(content: Any) -> str:
@@ -54,4 +55,36 @@ def to_openai_request(anthropic_req: MessagesRequest, model: str) -> ChatRequest
         model=model,
         messages=messages,
         max_tokens=anthropic_req.max_tokens,
+    )
+
+
+_FINISH_REASON_MAP: dict[str, str] = {
+    "stop": "end_turn",
+    "length": "max_tokens",
+    "tool_calls": "tool_use",
+}
+
+
+def from_openai_response(openai_resp: ChatResponse) -> MessagesResponse:
+    """Convert a non-streaming OpenAI ChatCompletion response to an Anthropic MessagesResponse."""
+    choice = openai_resp.choices[0]
+    text = choice.message.content or ""
+    stop_reason = _FINISH_REASON_MAP.get(choice.finish_reason or "", "end_turn")
+
+    usage = AnthropicUsage(
+        input_tokens=openai_resp.usage.prompt_tokens,
+        output_tokens=openai_resp.usage.completion_tokens,
+    )
+
+    resp_id = getattr(openai_resp, "id", None) or "msg_translated"
+    model = getattr(openai_resp, "model", None) or "unknown"
+
+    return MessagesResponse(
+        id=resp_id,
+        type="message",
+        role="assistant",
+        model=model,
+        content=[TextBlock(type="text", text=text)],
+        stop_reason=stop_reason,
+        usage=usage,
     )
