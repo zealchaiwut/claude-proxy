@@ -83,3 +83,30 @@ def get_tokenizer(name: str | None) -> Tokenizer:
     if name == "openai":
         return OpenAITokenizer()
     return HeuristicTokenizer()
+
+
+def count_text_tokens(text: str) -> int:
+    """Count tokens in text using cl100k_base BPE encoding (issue #54)."""
+    if not text:
+        return 0
+    try:
+        import tiktoken
+        return len(tiktoken.get_encoding("cl100k_base").encode(text))
+    except (ImportError, Exception):
+        return max(1, len(text) // 4)
+
+
+def count_messages_tokens(body_json: dict) -> int:
+    """Count tokens across all messages in a request body using cl100k_base (issue #54)."""
+    messages = body_json.get("messages", [])
+    parts: list[str] = []
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+    text = "".join(parts)
+    return count_text_tokens(text) if text else 1
