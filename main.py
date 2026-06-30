@@ -1,3 +1,4 @@
+import sys
 from contextlib import asynccontextmanager
 
 import httpx
@@ -45,8 +46,17 @@ def health(settings: Settings = Depends(get_settings)):
     return {"status": "ok", "upstream": settings.upstream_base_url}
 
 
+def main() -> None:
+    """Console entrypoint: read config.toml and start uvicorn."""
+    proxy_config, from_file = get_or_load_config()
+    if not from_file:
+        print(
+            "warning: config.toml not found — using environment variable defaults.\n"
+            "Copy config.example.toml to config.toml to configure the server.",
+            file=sys.stderr,
+        )
+    uvicorn.run("main:app", host=proxy_config.server.host, port=proxy_config.server.port)
+
+
 if __name__ == "__main__":
-    proxy_config, _ = get_or_load_config()
-    host = proxy_config.server.host
-    port = proxy_config.server.port
-    uvicorn.run("main:app", host=host, port=port)
+    main()
