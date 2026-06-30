@@ -8,8 +8,6 @@ from typing import Any, AsyncIterator
 
 from schemas.anthropic import MessagesRequest, MessagesResponse, TextBlock, ToolUseBlock
 from schemas.anthropic import Usage as AnthropicUsage
-
-_log = logging.getLogger(__name__)
 from schemas.openai import ChatRequest, ChatResponse
 from services.openai_sse_consumer import (
     ContentEvent,
@@ -18,6 +16,8 @@ from services.openai_sse_consumer import (
     consume_openai_sse_stream,
 )
 from services.sse import anthropic_sse_stream
+
+_log = logging.getLogger(__name__)
 
 
 def _get_blocks(content: Any) -> list[Any]:
