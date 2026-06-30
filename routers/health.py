@@ -11,7 +11,7 @@ from profiles import get_or_load_config, resolve_profile_name
 router = APIRouter()
 
 try:
-    from importlib.metadata import version as _pkg_version, PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
     _VERSION = _pkg_version("claude-proxy")
 except Exception:
     _VERSION = "0.1.0"
