@@ -38,7 +38,7 @@ OPENAI_MODEL=gpt-4o   # optional, default: gpt-4o
 
 Accepts standard Anthropic `POST /v1/messages` requests, translates them to OpenAI `/chat/completions` format, and translates the response back. Lets Claude Code clients target any OpenAI-compatible backend without client-side changes.
 
-**M1 limitation:** SSE streaming in OpenAI mode is not yet supported — the proxy always returns a single blocking completion regardless of the client's `stream` flag.
+Streaming (`stream: true`) is fully supported — OpenAI SSE chunks are translated to Anthropic SSE events on-the-fly and streamed back to the client as they arrive.
 
 ## Configuration
 
