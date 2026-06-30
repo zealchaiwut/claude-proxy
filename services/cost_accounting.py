@@ -58,6 +58,71 @@ def count_output_tokens(text: str) -> int:
     return max(1, len(words)) if words else 1
 
 
+def extract_upstream_usage_from_sse(data: bytes) -> tuple[int, int] | None:
+    """Return (input_tokens, output_tokens) only if upstream SSE reported them.
+
+    Unlike parse_anthropic_sse_usage, this never falls back to heuristics —
+    returns None when no upstream usage events appear in the stream.
+    Used for drift computation: drift = proxy_estimate - upstream_reported.
+    """
+    import json as _json
+
+    input_tokens = 0
+    output_tokens = 0
+    has_input = False
+    has_output = False
+
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        raw = line[len("data:"):].strip()
+        try:
+            payload = _json.loads(raw)
+        except (_json.JSONDecodeError, ValueError):
+            continue
+
+        ptype = payload.get("type")
+        if ptype == "message_start":
+            msg = payload.get("message", {})
+            usage = msg.get("usage", {})
+            it = usage.get("input_tokens")
+            if it:
+                input_tokens = int(it)
+                has_input = True
+        elif ptype == "message_delta":
+            usage = payload.get("usage", {})
+            ot = usage.get("output_tokens")
+            if ot:
+                output_tokens = int(ot)
+                has_output = True
+
+    if has_input or has_output:
+        return input_tokens, output_tokens
+    return None
+
+
+def extract_text_from_sse(data: bytes) -> str:
+    """Extract accumulated text content from buffered Anthropic SSE text_delta frames."""
+    import json as _json
+
+    text = ""
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        raw = line[len("data:"):].strip()
+        try:
+            payload = _json.loads(raw)
+        except (_json.JSONDecodeError, ValueError):
+            continue
+        if payload.get("type") == "content_block_delta":
+            delta = payload.get("delta", {})
+            if delta.get("type") == "text_delta":
+                text += delta.get("text", "")
+    return text
+
+
 def parse_anthropic_sse_usage(
     data: bytes,
     body_json: dict[str, Any],

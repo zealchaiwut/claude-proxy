@@ -54,10 +54,12 @@ class MetricsCollector:
         input_tokens: int = 0,
         output_tokens: int = 0,
         cost_usd: float = 0.0,
+        token_drift_input: int | None = None,
+        token_drift_output: int | None = None,
     ) -> None:
         ts = time.monotonic()
         with self._lock:
-            self._samples.append((ts, profile, status, latency_ms, input_tokens, output_tokens, cost_usd))
+            self._samples.append((ts, profile, status, latency_ms, input_tokens, output_tokens, cost_usd, token_drift_input, token_drift_output))
 
     def snapshot(self) -> dict:
         """Return a dict keyed by profile name with aggregated stats.
@@ -75,7 +77,10 @@ class MetricsCollector:
             samples = [s for s in samples if s[0] >= cutoff]
 
         accum: dict[str, dict] = {}
-        for _ts, profile, status, latency_ms, input_tokens, output_tokens, cost_usd in samples:
+        for sample in samples:
+            _ts, profile, status, latency_ms, input_tokens, output_tokens, cost_usd = sample[:7]
+            drift_in = sample[7] if len(sample) > 7 else None
+            drift_out = sample[8] if len(sample) > 8 else None
             if profile not in accum:
                 accum[profile] = {
                     "request_count": 0,
@@ -84,6 +89,8 @@ class MetricsCollector:
                     "total_output_tokens": 0,
                     "total_est_cost_usd": 0.0,
                     "_latencies": [],
+                    "_drift_inputs": [],
+                    "_drift_outputs": [],
                 }
             entry = accum[profile]
             entry["request_count"] += 1
@@ -95,10 +102,16 @@ class MetricsCollector:
                 entry["total_input_tokens"] += input_tokens
                 entry["total_output_tokens"] += output_tokens
                 entry["total_est_cost_usd"] += cost_usd
+            if drift_in is not None:
+                entry["_drift_inputs"].append(drift_in)
+            if drift_out is not None:
+                entry["_drift_outputs"].append(drift_out)
 
         result = {}
         for profile, entry in accum.items():
             lats = sorted(entry["_latencies"])
+            drift_ins = entry["_drift_inputs"]
+            drift_outs = entry["_drift_outputs"]
             result[profile] = {
                 "request_count": entry["request_count"],
                 "error_count": entry["error_count"],
@@ -107,5 +120,9 @@ class MetricsCollector:
                 "total_est_cost_usd": entry["total_est_cost_usd"],
                 "p50_latency_ms": _percentile(lats, 50),
                 "p95_latency_ms": _percentile(lats, 95),
+                "mean_drift_input": sum(drift_ins) / len(drift_ins) if drift_ins else None,
+                "abs_mean_drift_input": sum(abs(d) for d in drift_ins) / len(drift_ins) if drift_ins else None,
+                "mean_drift_output": sum(drift_outs) / len(drift_outs) if drift_outs else None,
+                "abs_mean_drift_output": sum(abs(d) for d in drift_outs) / len(drift_outs) if drift_outs else None,
             }
         return result
