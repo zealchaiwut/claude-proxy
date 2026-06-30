@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
 
 from routers._proxy_utils import filter_headers, proxy_request
-from schemas.anthropic import MessagesRequest
+from schemas.anthropic import MessagesRequest, TextBlock
 from schemas.openai import ChatResponse
 from services.translator import from_openai_response, live_stream_to_anthropic_sse, to_openai_request
 
@@ -92,17 +92,34 @@ async def messages_passthrough(request: Request) -> Response:
     )
 
 
+def _get_system_text(req: MessagesRequest) -> str | None:
+    if req.system is None:
+        return None
+    if isinstance(req.system, str):
+        return req.system
+    return "".join(b.text for b in req.system if isinstance(b, TextBlock))
+
+
 async def _handle_openai_mode(request: Request, body_json: dict) -> Response:
     # Read credentials at request time — never log these values
     openai_base_url = os.getenv("OPENAI_BASE_URL", "")
     openai_api_key = os.getenv("OPENAI_API_KEY", "")
     openai_model = os.getenv("OPENAI_MODEL", "gpt-4o")
+    tool_mode = os.getenv("CCPROXY_TOOL_MODE", "native")
 
     client: httpx.AsyncClient = request.app.state.http_client
     anthropic_req = MessagesRequest(**body_json)
 
+    # XML mode: inject tool spec into system prompt and clear native tools
+    if tool_mode == "xml" and anthropic_req.tools:
+        from services.xml_tool_mode import build_xml_system_prompt
+        xml_system = build_xml_system_prompt(_get_system_text(anthropic_req), list(anthropic_req.tools))
+        anthropic_req = anthropic_req.model_copy(update={"system": xml_system, "tools": None, "tool_choice": None})
+
     if _wants_stream(request, body_json):
-        return await _handle_openai_stream(client, anthropic_req, openai_base_url, openai_api_key, openai_model)
+        return await _handle_openai_stream(
+            client, anthropic_req, openai_base_url, openai_api_key, openai_model, tool_mode=tool_mode
+        )
 
     openai_req = to_openai_request(anthropic_req, model=openai_model)
     upstream_resp = await client.post(
@@ -117,6 +134,20 @@ async def _handle_openai_mode(request: Request, body_json: dict) -> Response:
     openai_resp = ChatResponse(**json.loads(upstream_resp.content))
     anthropic_resp = from_openai_response(openai_resp)
 
+    # XML mode: post-process — extract tool calls from text blocks
+    if tool_mode == "xml":
+        from services.xml_tool_mode import parse_xml_tool_calls
+        full_text = "".join(b.text for b in anthropic_resp.content if isinstance(b, TextBlock))
+        cleaned, tool_blocks = parse_xml_tool_calls(full_text)
+        if tool_blocks:
+            new_content: list = []
+            if cleaned:
+                new_content.append(TextBlock(type="text", text=cleaned))
+            new_content.extend(tool_blocks)
+            anthropic_resp = anthropic_resp.model_copy(
+                update={"content": new_content, "stop_reason": "tool_use"}
+            )
+
     return Response(
         content=anthropic_resp.model_dump_json(),
         status_code=200,
@@ -130,12 +161,13 @@ async def _handle_openai_stream(
     openai_base_url: str,
     openai_api_key: str,
     openai_model: str,
+    *,
+    tool_mode: str = "native",
 ) -> Response:
     """Return a live StreamingResponse translating OpenAI SSE to Anthropic SSE."""
     from schemas.openai import ChatRequest
 
     openai_req = to_openai_request(anthropic_req, model=openai_model)
-    # Build streaming OpenAI request
     req_body = ChatRequest(
         model=openai_model,
         messages=openai_req.messages,
@@ -163,6 +195,18 @@ async def _handle_openai_stream(
         finally:
             await stream_ctx.__aexit__(None, None, None)
         return Response(content=body, status_code=upstream.status_code, media_type="application/json")
+
+    if tool_mode == "xml":
+        from services.xml_tool_mode import xml_buffered_sse
+
+        async def _translate_xml():
+            try:
+                async for frame in xml_buffered_sse(upstream.aiter_bytes(), model=openai_model):
+                    yield frame.encode() if isinstance(frame, str) else frame
+            finally:
+                await stream_ctx.__aexit__(None, None, None)
+
+        return StreamingResponse(_translate_xml(), status_code=200, media_type="text/event-stream")
 
     async def _translate():
         content_sent = False

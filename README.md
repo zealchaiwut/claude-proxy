@@ -40,6 +40,10 @@ Accepts standard Anthropic `POST /v1/messages` requests, translates them to Open
 
 Streaming (`stream: true`) is fully supported — OpenAI SSE chunks are translated to Anthropic SSE events on-the-fly and streamed back to the client as they arrive.
 
+**Tool call support:** Anthropic `tools` and `tool_choice` are translated to OpenAI function-calling format. Responses containing OpenAI `tool_calls` are translated back to Anthropic `tool_use` blocks. Multi-turn conversations with `tool_result` turns are fully supported.
+
+**XML tool mode (`CCPROXY_TOOL_MODE=xml`):** For OpenAI-compatible upstreams that do not support native function calling, set `CCPROXY_TOOL_MODE=xml`. The proxy will inject tool definitions into the system prompt as an XML specification and parse `<tool_call>` blocks from the upstream response back into Anthropic `tool_use` blocks.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -52,6 +56,7 @@ Streaming (`stream: true`) is fully supported — OpenAI SSE chunks are translat
 | `OPENAI_BASE_URL` | — | OpenAI-compatible API base URL (OpenAI mode) |
 | `OPENAI_API_KEY` | — | API key for OpenAI-compatible API (OpenAI mode) |
 | `OPENAI_MODEL` | `gpt-4o` | Model name sent upstream (OpenAI mode) |
+| `CCPROXY_TOOL_MODE` | `native` | Tool call mode in OpenAI mode: `native` (function calling) or `xml` (XML prompt injection) |
 
 ## Proxied Endpoints
 
