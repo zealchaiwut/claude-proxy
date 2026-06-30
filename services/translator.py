@@ -1,11 +1,21 @@
 # M1 limitation: image and tool blocks (image, tool_use, tool_result) are silently skipped; full support deferred to M3.
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+import json
+import uuid
+from typing import Any, AsyncIterator
 
 from schemas.anthropic import MessagesRequest, MessagesResponse, TextBlock
 from schemas.anthropic import Usage as AnthropicUsage
 from schemas.openai import ChatRequest, ChatResponse
+from services.openai_sse_consumer import (
+    ContentEvent,
+    FinishEvent,
+    UsageEvent,
+    consume_openai_sse_stream,
+)
+from services.sse import anthropic_sse_stream
 
 
 def _extract_text(content: Any) -> str:
@@ -63,6 +73,137 @@ _FINISH_REASON_MAP: dict[str, str] = {
     "length": "max_tokens",
     "tool_calls": "tool_use",
 }
+
+
+def _sse_frame(event_type: str, data: dict) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+
+async def stream_to_anthropic_sse(
+    event_stream: AsyncIterator,
+    *,
+    model: str,
+    message_id: str,
+) -> AsyncIterator[str]:
+    """Bridge normalized OpenAI SSE events to Anthropic SSE frames.
+
+    Consumes an async iterator that yields duck-typed event objects:
+      - .text (str)   → ContentEvent: a text delta
+      - .reason (str) → FinishEvent: the finish reason
+      - .usage (dict) → UsageEvent: token usage from upstream
+
+    Buffers all events, then replays text deltas through anthropic_sse_stream
+    so that stop_reason and usage — which arrive at stream end — are available
+    when the emitter emits message_start and message_delta.
+    """
+    text_parts: list[str] = []
+    stop_reason = "end_turn"
+    upstream_usage: dict[str, Any] | None = None
+
+    async for event in event_stream:
+        if hasattr(event, "text"):
+            text_parts.append(event.text)
+        elif hasattr(event, "reason"):
+            stop_reason = _FINISH_REASON_MAP.get(event.reason, "end_turn")
+        elif hasattr(event, "usage"):
+            upstream_usage = event.usage
+
+    if upstream_usage is not None:
+        output_tokens = upstream_usage.get("completion_tokens", 0) or 0
+    else:
+        # Fallback: count words in accumulated text as a rough token estimate.
+        accumulated = "".join(text_parts)
+        output_tokens = max(1, len(accumulated.split())) if accumulated else 0
+
+    usage = {"input_tokens": 0, "output_tokens": output_tokens}
+
+    async def _replay():
+        for text in text_parts:
+            yield text
+
+    async for frame in anthropic_sse_stream(
+        _replay(),
+        stop_reason=stop_reason,
+        usage=usage,
+        model=model,
+        message_id=message_id,
+    ):
+        yield frame
+
+
+async def live_stream_to_anthropic_sse(
+    byte_stream: AsyncIterator[bytes],
+    *,
+    model: str,
+    message_id: str | None = None,
+    ping_interval: float = 15.0,
+) -> AsyncIterator[str]:
+    """Translate an OpenAI SSE byte stream to Anthropic SSE frames with no buffering.
+
+    Each content delta is forwarded immediately. Periodic `: ping` comments are
+    emitted to keep the connection alive. Collects stop_reason and usage from
+    downstream events and emits them in the final Anthropic frames.
+    """
+    mid = message_id or f"msg_{uuid.uuid4().hex[:24]}"
+    stop_reason = "end_turn"
+    input_tokens = 0
+    output_tokens = 0
+
+    yield _sse_frame("message_start", {
+        "type": "message_start",
+        "message": {
+            "id": mid,
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [],
+            "usage": {"input_tokens": input_tokens},
+        },
+    })
+    yield _sse_frame("content_block_start", {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "text", "text": ""},
+    })
+
+    _DONE = object()
+    event_iter = consume_openai_sse_stream(byte_stream).__aiter__()
+
+    async def _next():
+        try:
+            return await event_iter.__anext__()
+        except StopAsyncIteration:
+            return _DONE
+
+    task: asyncio.Future = asyncio.ensure_future(_next())
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=ping_interval)
+        if not done:
+            yield ": ping\n\n"
+            continue
+        result = task.result()
+        if result is _DONE:
+            break
+        if isinstance(result, ContentEvent):
+            yield _sse_frame("content_block_delta", {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": result.text},
+            })
+        elif isinstance(result, FinishEvent):
+            stop_reason = _FINISH_REASON_MAP.get(result.reason, "end_turn")
+        elif isinstance(result, UsageEvent):
+            input_tokens = result.usage.get("prompt_tokens", 0) or 0
+            output_tokens = result.usage.get("completion_tokens", 0) or 0
+        task = asyncio.ensure_future(_next())
+
+    yield _sse_frame("content_block_stop", {"type": "content_block_stop", "index": 0})
+    yield _sse_frame("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+        "usage": {"output_tokens": output_tokens},
+    })
+    yield _sse_frame("message_stop", {"type": "message_stop"})
 
 
 def from_openai_response(openai_resp: ChatResponse) -> MessagesResponse:
