@@ -15,6 +15,7 @@ from services.openai_sse_consumer import (
     UsageEvent,
     consume_openai_sse_stream,
 )
+from services.sse import anthropic_sse_stream
 
 
 def _extract_text(content: Any) -> str:
@@ -82,62 +83,52 @@ async def stream_to_anthropic_sse(
     event_stream: AsyncIterator,
     *,
     model: str,
-    message_id: str | None = None,
+    message_id: str,
 ) -> AsyncIterator[str]:
-    """Translate a pre-parsed OpenAI event stream to Anthropic SSE frames.
+    """Bridge normalized OpenAI SSE events to Anthropic SSE frames.
 
-    Accepts an async iterator of ContentEvent / FinishEvent / UsageEvent objects
-    (duck-typed: needs .text, .reason, or .usage attribute). When no UsageEvent
-    arrives, falls back to a character-count estimate so output_tokens is non-zero.
+    Consumes an async iterator that yields duck-typed event objects:
+      - .text (str)   → ContentEvent: a text delta
+      - .reason (str) → FinishEvent: the finish reason
+      - .usage (dict) → UsageEvent: token usage from upstream
+
+    Buffers all events, then replays text deltas through anthropic_sse_stream
+    so that stop_reason and usage — which arrive at stream end — are available
+    when the emitter emits message_start and message_delta.
     """
-    mid = message_id or f"msg_{uuid.uuid4().hex[:24]}"
+    text_parts: list[str] = []
     stop_reason = "end_turn"
-    output_tokens: int | None = None
-    collected_text: list[str] = []
-
-    yield _sse_frame("message_start", {
-        "type": "message_start",
-        "message": {
-            "id": mid,
-            "type": "message",
-            "role": "assistant",
-            "model": model,
-            "content": [],
-            "usage": {"input_tokens": 0},
-        },
-    })
-    yield _sse_frame("content_block_start", {
-        "type": "content_block_start",
-        "index": 0,
-        "content_block": {"type": "text", "text": ""},
-    })
+    upstream_usage: dict[str, Any] | None = None
 
     async for event in event_stream:
         if hasattr(event, "text"):
-            collected_text.append(event.text)
-            yield _sse_frame("content_block_delta", {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {"type": "text_delta", "text": event.text},
-            })
+            text_parts.append(event.text)
         elif hasattr(event, "reason"):
             stop_reason = _FINISH_REASON_MAP.get(event.reason, "end_turn")
         elif hasattr(event, "usage"):
-            ct = event.usage.get("completion_tokens", 0) or 0
-            if ct:
-                output_tokens = ct
+            upstream_usage = event.usage
 
-    if output_tokens is None:
-        full_text = "".join(collected_text)
-        output_tokens = max(1, len(full_text) // 4) if full_text else 1
+    if upstream_usage is not None:
+        output_tokens = upstream_usage.get("completion_tokens", 0) or 0
+    else:
+        # Fallback: count words in accumulated text as a rough token estimate.
+        accumulated = "".join(text_parts)
+        output_tokens = max(1, len(accumulated.split())) if accumulated else 0
 
-    yield _sse_frame("content_block_stop", {"type": "content_block_stop", "index": 0})
-    yield _sse_frame("message_delta", {
-        "type": "message_delta",
-        "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-        "usage": {"output_tokens": output_tokens},
-    })
-    yield _sse_frame("message_stop", {"type": "message_stop"})
+    usage = {"input_tokens": 0, "output_tokens": output_tokens}
+
+    async def _replay():
+        for text in text_parts:
+            yield text
+
+    async for frame in anthropic_sse_stream(
+        _replay(),
+        stop_reason=stop_reason,
+        usage=usage,
+        model=model,
+        message_id=message_id,
+    ):
+        yield frame
 
 
 async def live_stream_to_anthropic_sse(
