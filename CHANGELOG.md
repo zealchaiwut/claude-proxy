@@ -3,6 +3,16 @@
 Per-sprint changelog for claude-proxy. Entries are written by the documentor when a
 sprint finishes. Dated per-sprint files live under [docs/changelog/](docs/changelog/).
 
+## Sprint 3.1
+
+- #18: Bridge OpenAI stream to Anthropic emitter in translator
+- #19: Wire live SSE streaming for OpenAI proxy mode
+
+## Sprint 3
+
+- #16: Add Anthropic SSE streaming event emitter service
+- #17: Add OpenAI SSE streaming consumer for chat completions
+
 ## Sprint 2
 
 - #9: Add translator service: Anthropic → OpenAI request mapping
