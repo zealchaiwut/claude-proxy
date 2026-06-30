@@ -1,14 +1,11 @@
 """Tests for issue #35: profiles config system via config.toml."""
 import textwrap
-from pathlib import Path
 
-import pytest
 
 from profiles import (
     ProfileConfig,
     ProfileRegistry,
     ProxyConfig,
-    ServerConfig,
     get_or_load_config,
     load_config,
 )

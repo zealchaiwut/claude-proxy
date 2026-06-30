@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
-import pytest
 from fastapi.testclient import TestClient
 
 from config import Settings
@@ -311,7 +310,8 @@ def test_state_json_default_routes_to_profile_upstream(monkeypatch):
     monkeypatch.setattr("profiles._state_json_path", Path("/nonexistent"))  # will be overridden below
 
     # Write state.json with active_profile
-    import tempfile, os
+    import tempfile
+    import os
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump({"active_profile": "state-profile"}, f)
         tmp_name = f.name

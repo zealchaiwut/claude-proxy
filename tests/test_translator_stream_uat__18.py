@@ -11,7 +11,6 @@ Acceptance criteria coverage:
 """
 import json
 import os
-from typing import Iterator
 
 import httpx
 import pytest
