@@ -18,8 +18,9 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     app.state.settings = settings
 
-    proxy_config, _ = get_or_load_config()
+    proxy_config, config_from_file = get_or_load_config()
     app.state.proxy_config = proxy_config
+    app.state.config_from_file = config_from_file
     app.state.profile_registry = ProfileRegistry(proxy_config)
 
     client = httpx.AsyncClient(timeout=httpx.Timeout(settings.upstream_read_timeout))

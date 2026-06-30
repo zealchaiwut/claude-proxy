@@ -1,3 +1,4 @@
+import json
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -89,6 +90,46 @@ def _make_legacy_config() -> ProxyConfig:
         ),
     }
     return ProxyConfig(server=server, profiles=profiles)
+
+
+_state_json_path: Path = Path("state.json")
+
+
+def _read_state_default(path: Path) -> str | None:
+    """Read active_profile from state.json; return None on any error."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data.get("active_profile")
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, OSError):
+        return None
+
+
+def resolve_profile_name(
+    header: str | None,
+    query_param: str | None,
+    state_json_path: Path | None = None,
+) -> str:
+    """Resolve profile name using 4-level precedence.
+
+    1. X-CCProxy-Profile header
+    2. ?profile= query param
+    3. CCPROXY_PROFILE environment variable
+    4. active_profile from state.json
+    5. Built-in 'anthropic' default
+    """
+    if header:
+        return header
+    if query_param:
+        return query_param
+    env_profile = os.getenv("CCPROXY_PROFILE")
+    if env_profile:
+        return env_profile
+    path = state_json_path if state_json_path is not None else _state_json_path
+    state_default = _read_state_default(path)
+    if state_default:
+        return state_default
+    return "anthropic"
 
 
 def get_or_load_config(

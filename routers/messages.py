@@ -5,6 +5,7 @@ import httpx
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
 
+from profiles import ProfileRegistry, resolve_profile_name
 from routers._proxy_utils import filter_headers, proxy_request
 from schemas.anthropic import MessagesRequest, TextBlock
 from schemas.openai import ChatResponse
@@ -38,28 +39,27 @@ def _count_tokens_heuristic(body: dict) -> int:
     return max(1, total_chars // 4)
 
 
-@router.post("/v1/messages")
-async def messages_passthrough(request: Request) -> Response:
-    body_bytes = await request.body()
-    headers = _filter_headers(request.headers)
+def _get_profile_name(request: Request) -> str:
+    """Resolve per-request profile name using 4-level precedence chain."""
+    return resolve_profile_name(
+        header=request.headers.get("x-ccproxy-profile"),
+        query_param=request.query_params.get("profile"),
+    )
 
-    try:
-        body_json = json.loads(body_bytes)
-    except (ValueError, TypeError):
-        body_json = {}
 
-    profile = os.getenv("CCPROXY_PROFILE", "anthropic")
-
-    if profile == "openai":
-        return await _handle_openai_mode(request, body_json)
-
-    # anthropic mode: byte-for-byte passthrough
-    settings = request.app.state.settings
+async def _passthrough(
+    request: Request,
+    body_bytes: bytes,
+    body_json: dict,
+    headers: dict[str, str],
+    upstream_base: str,
+) -> Response:
+    """Forward POST /v1/messages to upstream_base, streaming or non-streaming."""
     client: httpx.AsyncClient = request.app.state.http_client
 
     if not _wants_stream(request, body_json):
         upstream_resp = await client.post(
-            f"{settings.upstream_base_url}/v1/messages",
+            f"{upstream_base}/v1/messages",
             content=body_bytes,
             headers=headers,
         )
@@ -69,10 +69,9 @@ async def messages_passthrough(request: Request) -> Response:
             headers=_filter_headers(upstream_resp.headers),
         )
 
-    # streaming passthrough for anthropic mode
     stream_ctx = client.stream(
         "POST",
-        f"{settings.upstream_base_url}/v1/messages",
+        f"{upstream_base}/v1/messages",
         content=body_bytes,
         headers=headers,
     )
@@ -92,6 +91,45 @@ async def messages_passthrough(request: Request) -> Response:
     )
 
 
+@router.post("/v1/messages")
+async def messages_passthrough(request: Request) -> Response:
+    body_bytes = await request.body()
+    headers = _filter_headers(request.headers)
+
+    try:
+        body_json = json.loads(body_bytes)
+    except (ValueError, TypeError):
+        body_json = {}
+
+    profile_name = _get_profile_name(request)
+
+    # Registry path: used when a config.toml was loaded at startup
+    config_from_file: bool = getattr(request.app.state, "config_from_file", False)
+    if config_from_file:
+        registry: ProfileRegistry | None = getattr(request.app.state, "profile_registry", None)
+        if registry is not None:
+            try:
+                kind, upstream_url, api_key, model, _ = registry.resolve(profile_name)
+                if kind == "openai":
+                    return await _handle_openai_mode(
+                        request,
+                        body_json,
+                        openai_base_url=upstream_url,
+                        openai_api_key=api_key,
+                        openai_model=model or os.getenv("OPENAI_MODEL", "gpt-4o"),
+                    )
+                return await _passthrough(request, body_bytes, body_json, headers, upstream_url)
+            except KeyError:
+                pass  # profile not in registry; fall through to legacy
+
+    # Legacy path (env-var based, backward-compatible with M1/M2 behavior)
+    if profile_name == "openai":
+        return await _handle_openai_mode(request, body_json)
+
+    settings = request.app.state.settings
+    return await _passthrough(request, body_bytes, body_json, headers, settings.upstream_base_url)
+
+
 def _get_system_text(req: MessagesRequest) -> str | None:
     if req.system is None:
         return None
@@ -100,11 +138,21 @@ def _get_system_text(req: MessagesRequest) -> str | None:
     return "".join(b.text for b in req.system if isinstance(b, TextBlock))
 
 
-async def _handle_openai_mode(request: Request, body_json: dict) -> Response:
-    # Read credentials at request time — never log these values
-    openai_base_url = os.getenv("OPENAI_BASE_URL", "")
-    openai_api_key = os.getenv("OPENAI_API_KEY", "")
-    openai_model = os.getenv("OPENAI_MODEL", "gpt-4o")
+async def _handle_openai_mode(
+    request: Request,
+    body_json: dict,
+    *,
+    openai_base_url: str | None = None,
+    openai_api_key: str | None = None,
+    openai_model: str | None = None,
+) -> Response:
+    # Fall back to env vars when values not supplied (legacy mode)
+    if openai_base_url is None:
+        openai_base_url = os.getenv("OPENAI_BASE_URL", "")
+    if openai_api_key is None:
+        openai_api_key = os.getenv("OPENAI_API_KEY", "")
+    if openai_model is None:
+        openai_model = os.getenv("OPENAI_MODEL", "gpt-4o")
     tool_mode = os.getenv("CCPROXY_TOOL_MODE", "native")
 
     client: httpx.AsyncClient = request.app.state.http_client
@@ -234,14 +282,38 @@ async def _handle_openai_stream(
 
 @router.post("/v1/messages/count_tokens")
 async def count_tokens_passthrough(request: Request) -> Response:
-    profile = os.getenv("CCPROXY_PROFILE", "anthropic")
+    body_bytes = await request.body()
+    try:
+        body_json = json.loads(body_bytes)
+    except (ValueError, TypeError):
+        body_json = {}
 
-    if profile == "openai":
-        body_bytes = await request.body()
-        try:
-            body_json = json.loads(body_bytes)
-        except (ValueError, TypeError):
-            body_json = {}
+    profile_name = _get_profile_name(request)
+
+    # Registry path
+    config_from_file: bool = getattr(request.app.state, "config_from_file", False)
+    if config_from_file:
+        registry: ProfileRegistry | None = getattr(request.app.state, "profile_registry", None)
+        if registry is not None:
+            try:
+                kind, upstream_url, _, _, _ = registry.resolve(profile_name)
+                if kind == "openai":
+                    token_count = _count_tokens_heuristic(body_json)
+                    return Response(
+                        content=json.dumps({"input_tokens": token_count}),
+                        status_code=200,
+                        media_type="application/json",
+                    )
+                return await proxy_request(
+                    request,
+                    f"{upstream_url}/v1/messages/count_tokens",
+                    method="POST",
+                )
+            except KeyError:
+                pass
+
+    # Legacy path
+    if profile_name == "openai":
         token_count = _count_tokens_heuristic(body_json)
         return Response(
             content=json.dumps({"input_tokens": token_count}),
@@ -249,7 +321,6 @@ async def count_tokens_passthrough(request: Request) -> Response:
             media_type="application/json",
         )
 
-    # anthropic mode: passthrough unchanged
     settings = request.app.state.settings
     return await proxy_request(
         request,
