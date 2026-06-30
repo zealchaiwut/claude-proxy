@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 from routers._proxy_utils import filter_headers, proxy_request
 from schemas.anthropic import MessagesRequest
 from schemas.openai import ChatResponse
-from services.translator import from_openai_response, to_openai_request
+from services.translator import from_openai_response, live_stream_to_anthropic_sse, to_openai_request
 
 router = APIRouter()
 
@@ -99,13 +99,12 @@ async def _handle_openai_mode(request: Request, body_json: dict) -> Response:
     openai_model = os.getenv("OPENAI_MODEL", "gpt-4o")
 
     client: httpx.AsyncClient = request.app.state.http_client
-
     anthropic_req = MessagesRequest(**body_json)
-    # stream=true: request non-streaming from upstream; limitation documented below
-    # M1 limitation: SSE streaming in OpenAI mode is deferred to M2 — the proxy
-    # always requests a single blocking completion regardless of the client's stream flag.
-    openai_req = to_openai_request(anthropic_req, model=openai_model)
 
+    if _wants_stream(request, body_json):
+        return await _handle_openai_stream(client, anthropic_req, openai_base_url, openai_api_key, openai_model)
+
+    openai_req = to_openai_request(anthropic_req, model=openai_model)
     upstream_resp = await client.post(
         f"{openai_base_url}/chat/completions",
         content=openai_req.model_dump_json().encode(),
@@ -122,6 +121,70 @@ async def _handle_openai_mode(request: Request, body_json: dict) -> Response:
         content=anthropic_resp.model_dump_json(),
         status_code=200,
         media_type="application/json",
+    )
+
+
+async def _handle_openai_stream(
+    client: httpx.AsyncClient,
+    anthropic_req: MessagesRequest,
+    openai_base_url: str,
+    openai_api_key: str,
+    openai_model: str,
+) -> Response:
+    """Return a live StreamingResponse translating OpenAI SSE to Anthropic SSE."""
+    from schemas.openai import ChatRequest
+
+    openai_req = to_openai_request(anthropic_req, model=openai_model)
+    # Build streaming OpenAI request
+    req_body = ChatRequest(
+        model=openai_model,
+        messages=openai_req.messages,
+        max_tokens=openai_req.max_tokens,
+        stream=True,
+    ).model_dump_json().encode()
+
+    stream_ctx = client.stream(
+        "POST",
+        f"{openai_base_url}/chat/completions",
+        content=req_body,
+        headers={
+            "Authorization": f"Bearer {openai_api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    upstream = await stream_ctx.__aenter__()
+
+    # Pre-content error: upstream returned non-2xx before any SSE data
+    if upstream.status_code >= 400:
+        try:
+            body = b""
+            async for chunk in upstream.aiter_bytes():
+                body += chunk
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
+        return Response(content=body, status_code=upstream.status_code, media_type="application/json")
+
+    async def _translate():
+        content_sent = False
+        try:
+            async for frame in live_stream_to_anthropic_sse(
+                upstream.aiter_bytes(),
+                model=openai_model,
+            ):
+                if "content_block_delta" in frame:
+                    content_sent = True
+                yield frame.encode() if isinstance(frame, str) else frame
+        except Exception as exc:
+            if content_sent:
+                err_frame = f'event: error\ndata: {json.dumps({"type": "error", "error": {"type": "stream_error", "message": str(exc)}})}\n\n'
+                yield err_frame.encode()
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
+
+    return StreamingResponse(
+        _translate(),
+        status_code=200,
+        media_type="text/event-stream",
     )
 
 
