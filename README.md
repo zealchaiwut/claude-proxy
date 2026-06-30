@@ -245,6 +245,84 @@ A request tagged with all three headers produces a JSONL record like:
 }
 ```
 
+## Service Installation
+
+Run `claude-proxy` as a persistent background service that starts automatically
+on login and restarts after failures.
+
+### macOS (launchd)
+
+```bash
+python scripts/install_service.py
+```
+
+This installs a launchd user agent that starts at login and restarts the proxy
+when it crashes. Credentials are loaded from `~/.config/claude-proxy/env` —
+never stored in the service unit.
+
+**Check status**
+
+```bash
+launchctl list com.zealchaiwut.claude-proxy
+```
+
+**View logs**
+
+```bash
+tail -f ~/Library/Logs/claude-proxy/claude-proxy.log
+tail -f ~/Library/Logs/claude-proxy/claude-proxy.err
+```
+
+**Uninstall**
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.zealchaiwut.claude-proxy.plist
+rm ~/Library/LaunchAgents/com.zealchaiwut.claude-proxy.plist
+```
+
+### Linux (systemd user unit)
+
+```bash
+python scripts/install_service.py
+```
+
+This installs a systemd user unit that starts automatically and restarts on
+failure. Credentials are loaded from `~/.config/claude-proxy/env` via
+`EnvironmentFile=` — never stored in the unit.
+
+**Check status**
+
+```bash
+systemctl --user status claude-proxy
+```
+
+**View logs**
+
+```bash
+journalctl --user -u claude-proxy -f
+```
+
+**Uninstall**
+
+```bash
+systemctl --user disable --now claude-proxy
+rm ~/.config/systemd/user/claude-proxy.service
+systemctl --user daemon-reload
+```
+
+### Env file
+
+Both platforms read credentials from `~/.config/claude-proxy/env`.
+The installer creates a template if the file does not already exist:
+
+```bash
+# ~/.config/claude-proxy/env
+ANTHROPIC_API_KEY=sk-ant-...
+CCPROXY_PROFILE=anthropic
+```
+
+This file is never committed to version control — it lives only on the host.
+
 ## Running Tests
 
 ```bash
