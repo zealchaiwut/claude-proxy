@@ -3,6 +3,13 @@
 Per-sprint changelog for claude-proxy. Entries are written by the documentor when a
 sprint finishes. Dated per-sprint files live under [docs/changelog/](docs/changelog/).
 
+## Sprint 5
+
+- #35: Introduce profiles config system via config.toml
+- #36: Per-request profile resolution on /v1/messages endpoints
+- #37: Add ccswitch CLI and active-profile state file
+- #38: Add per-dispatch profile selection and model_map routing
+
 ## Sprint 4
 
 - #22: Map Anthropic tools and tool_choice to OpenAI format
