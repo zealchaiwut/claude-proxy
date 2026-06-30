@@ -204,12 +204,17 @@ async def _dispatch(
                         or model
                         or os.getenv("OPENAI_MODEL", "gpt-4o")
                     )
+                    thinking_mode = (
+                        registry.get_thinking_mode(profile_name)
+                        or request.app.state.settings.openai_thinking_mode
+                    )
                     response = await _handle_openai_mode(
                         request,
                         body_json,
                         openai_base_url=upstream_url,
                         openai_api_key=api_key,
                         openai_model=upstream_model,
+                        thinking_mode=thinking_mode,
                     )
                     return response, {
                         "profile_kind": "openai",
@@ -237,7 +242,11 @@ async def _dispatch(
     if profile_name == "openai":
         openai_base_url = os.getenv("OPENAI_BASE_URL", "")
         upstream_model = os.getenv("OPENAI_MODEL", "gpt-4o")
-        response = await _handle_openai_mode(request, body_json)
+        response = await _handle_openai_mode(
+            request,
+            body_json,
+            thinking_mode=request.app.state.settings.openai_thinking_mode,
+        )
         return response, {
             "profile_kind": "openai",
             "upstream_model": upstream_model,
@@ -452,6 +461,7 @@ async def _handle_openai_mode(
     openai_base_url: str | None = None,
     openai_api_key: str | None = None,
     openai_model: str | None = None,
+    thinking_mode: str = "disabled",
 ) -> Response:
     # Fall back to env vars when values not supplied (legacy mode)
     if openai_base_url is None:
@@ -484,9 +494,12 @@ async def _handle_openai_mode(
             openai_api_key,
             openai_model,
             tool_mode=tool_mode,
+            thinking_mode=thinking_mode,
         )
 
-    openai_req = to_openai_request(anthropic_req, model=openai_model)
+    openai_req = to_openai_request(
+        anthropic_req, model=openai_model, thinking_mode=thinking_mode
+    )
     upstream_resp = await client.post(
         f"{openai_base_url}/chat/completions",
         content=openai_req.model_dump_json().encode(),
@@ -538,21 +551,24 @@ async def _handle_openai_stream(
     openai_model: str,
     *,
     tool_mode: str = "native",
+    thinking_mode: str = "disabled",
 ) -> Response:
     """Return a live StreamingResponse translating OpenAI SSE to Anthropic SSE."""
     from schemas.openai import ChatRequest
 
-    openai_req = to_openai_request(anthropic_req, model=openai_model)
-    req_body = (
-        ChatRequest(
-            model=openai_model,
-            messages=openai_req.messages,
-            max_tokens=openai_req.max_tokens,
-            stream=True,
-        )
-        .model_dump_json()
-        .encode()
+    openai_req = to_openai_request(
+        anthropic_req, model=openai_model, thinking_mode=thinking_mode
     )
+    stream_req = ChatRequest(
+        model=openai_model,
+        messages=openai_req.messages,
+        max_tokens=openai_req.max_tokens,
+        stream=True,
+    )
+    # Carry the thinking field set by to_openai_request (extra="allow").
+    if getattr(openai_req, "thinking", None) is not None:
+        stream_req.thinking = openai_req.thinking
+    req_body = stream_req.model_dump_json().encode()
 
     stream_ctx = client.stream(
         "POST",

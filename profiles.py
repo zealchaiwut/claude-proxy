@@ -21,6 +21,9 @@ class ProfileConfig:
     model: str | None = None
     model_map: dict[str, str] = field(default_factory=dict)
     pricing: PricingConfig | None = None
+    # Per-profile override of extended-thinking handling on the OpenAI path.
+    # None means "use the global default" (config.Settings.openai_thinking_mode).
+    openai_thinking_mode: str | None = None
 
 
 @dataclass
@@ -56,6 +59,13 @@ class ProfileRegistry:
             return None
         return profile.pricing
 
+    def get_thinking_mode(self, name: str) -> str | None:
+        """Return the profile's openai_thinking_mode override, or None if unset."""
+        profile = self._config.profiles.get(name)
+        if profile is None:
+            return None
+        return profile.openai_thinking_mode
+
 
 def load_config(path: Path) -> ProxyConfig:
     """Parse a config.toml file into a ProxyConfig."""
@@ -86,6 +96,7 @@ def load_config(path: Path) -> ProxyConfig:
             model=p.get("model"),
             model_map=dict(p.get("model_map", {})),
             pricing=pricing,
+            openai_thinking_mode=p.get("openai_thinking_mode"),
         )
 
     return ProxyConfig(server=server, profiles=profiles)
