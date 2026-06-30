@@ -92,15 +92,19 @@ def _make_legacy_config() -> ProxyConfig:
     return ProxyConfig(server=server, profiles=profiles)
 
 
-_state_json_path: Path = Path("state.json")
+_state_json_path: Path = Path.home() / ".config" / "ccswitch" / "state.json"
 
 
 def _read_state_default(path: Path) -> str | None:
-    """Read active_profile from state.json; return None on any error."""
+    """Read active profile from ccswitch state.json; return None on any error.
+
+    Reads the 'active' key written by ccswitch; falls back to 'active_profile'
+    for backwards compatibility with prior state files.
+    """
     try:
         with open(path) as f:
             data = json.load(f)
-        return data.get("active_profile")
+        return data.get("active") or data.get("active_profile") or None
     except (FileNotFoundError, json.JSONDecodeError, TypeError, OSError):
         return None
 
@@ -115,7 +119,7 @@ def resolve_profile_name(
     1. X-CCProxy-Profile header
     2. ?profile= query param
     3. CCPROXY_PROFILE environment variable
-    4. active_profile from state.json
+    4. active profile from ~/.config/ccswitch/state.json (written by ccswitch)
     5. Built-in 'anthropic' default
     """
     if header:
