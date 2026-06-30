@@ -1,7 +1,6 @@
 """Tests for issue #10: from_openai_response translator in services/translator.py."""
 from __future__ import annotations
 
-import pytest
 
 from schemas.openai import ChatResponse, Choice, ChatMessage, Usage as OpenAIUsage
 from services.translator import from_openai_response
