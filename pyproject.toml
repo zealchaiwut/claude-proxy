@@ -25,3 +25,14 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+only-include = [
+  "main.py",
+  "config.py",
+  "profiles.py",
+  "ccswitch.py",
+  "routers",
+  "services",
+  "schemas",
+]
