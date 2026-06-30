@@ -1,5 +1,4 @@
 """UAT tests for issue #41: token and cost accounting (runs against UAT)."""
-import os
 import pytest
 
 
