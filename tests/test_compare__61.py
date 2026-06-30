@@ -11,7 +11,6 @@ import json
 from io import StringIO
 from unittest.mock import MagicMock, patch
 
-
 from ccproxy import cmd_compare, _replay_profile
 
 # ---------------------------------------------------------------------------
@@ -254,7 +253,7 @@ def test_compare_cheapest_marker_present(tmp_path):
     # profile-b is cheaper: (50/1e6)*1.0 + (20/1e6)*5.0 = 0.000050 + 0.000100 = $0.000150
     # profile-a: (200/1e6)*3.0 + (100/1e6)*15.0 = 0.000600 + 0.001500 = $0.002100
     lines = table.splitlines()
-    profile_b_line = next(l for l in lines if "profile-b" in l)
+    profile_b_line = next(ln for ln in lines if "profile-b" in ln)
     assert "CHEAPEST" in profile_b_line, "CHEAPEST must appear on profile-b row (lower cost)"
 
 
@@ -366,7 +365,7 @@ def test_partial_failure_failed_profile_in_table(tmp_path):
 
     table = out.getvalue()
     lines = table.splitlines()
-    profile_b_line = next(l for l in lines if "profile-b" in l)
+    profile_b_line = next(ln for ln in lines if "profile-b" in ln)
     assert "FAILED" in profile_b_line, "profile-b must appear as FAILED in the table"
 
 
@@ -395,7 +394,7 @@ def test_partial_failure_successful_profile_data_present(tmp_path):
 
     table = out.getvalue()
     lines = table.splitlines()
-    profile_a_line = next(l for l in lines if "profile-a" in l)
+    profile_a_line = next(ln for ln in lines if "profile-a" in ln)
     # profile-a should show token counts and cost, not FAILED
     assert "FAILED" not in profile_a_line, "profile-a must not be shown as FAILED"
     assert "200" in profile_a_line or "end_turn" in profile_a_line, (
@@ -516,7 +515,7 @@ def test_unknown_profile_shows_failed_in_table(tmp_path):
     table = out.getvalue()
     assert "no-such-profile" in table
     lines = table.splitlines()
-    bad_line = next(l for l in lines if "no-such-profile" in l)
+    bad_line = next(ln for ln in lines if "no-such-profile" in ln)
     assert "FAILED" in bad_line
     # Partial success — one profile is OK
     assert rc == 0
