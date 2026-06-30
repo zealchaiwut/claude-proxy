@@ -1,0 +1,52 @@
+# M4 — Toggle CLI + profiles + per-dispatch selection
+
+**Date:** 2026-06-30
+**Sprint label:** NEW
+**Default labels:** enhancement, backend
+**Status:** drafted
+
+Milestone M4 closes the MVP. Generalize M1's ad-hoc env switch into a real
+profile system (config.toml), add the `ccswitch` CLI for the human's global
+default, and — the load-bearing piece for Commander — make the active backend
+resolve **per request / per dispatched subprocess** so concurrent agents never
+race a global toggle. After this: one stable endpoint, instant switch, both
+backends doing real tool-using work, with selection driven either by hand or by
+Commander per dispatch. Depends on M1–M3.
+
+## Prompts
+
+Paste one code block into the Bulk Create textarea. Prompts are `---`-separated.
+
+```
+Introduce a profiles config system replacing M1's ad-hoc env reads. Load `config.toml` with a [server] table (host default 127.0.0.1, port default 8788) and one [profiles.<name>] table per backend, each with kind ("passthrough" | "openai"), upstream (base URL), and for openai: api_key_env (the NAME of the env var holding the key — never the key value itself), model, and an optional [profiles.<name>.model_map] mapping a client-requested model → upstream model. Add a ProfileRegistry that resolves a profile name into an effective (kind, upstream, api_key, model, model_map), reading the secret from os.environ[api_key_env] at request time. Keep a back-compat path: if no config.toml is present, fall back to the M1 behavior (CCPROXY_PROFILE + OPENAI_* env). Acceptance: (1) a config.toml with an anthropic passthrough profile and an openai profile loads and resolves both; (2) the openai api key is read from the named env var and never stored in config or written to logs; (3) model_map translates a requested model to the configured upstream model; (4) with no config.toml, the M1 env behavior still works; (5) pytest covers loading, resolution, env-secret indirection, model_map, and the back-compat fallback.
+---
+Make `/v1/messages` and `/v1/messages/count_tokens` resolve the active profile PER REQUEST, concurrency-safe. Resolution order: (1) request-scoped selector — `X-CCProxy-Profile` header or `?profile=` query param; else (2) env CCPROXY_PROFILE; else (3) the active default from state.json (next ticket); else the built-in "anthropic" default. The handler chooses passthrough vs openai translation from the resolved profile's kind and uses that profile's upstream/key/model. Nothing mutable-global is consulted in the hot path beyond reading the default, so two simultaneous requests with different selectors resolve independently and don't interfere. Acceptance: (1) a request with X-CCProxy-Profile=openai is translated even while the global default is anthropic; (2) env and state.json defaults apply, in the stated precedence, when no per-request selector is present; (3) two concurrent requests selecting different profiles each hit their own upstream; (4) pytest asserts the precedence chain and concurrent isolation against two stub upstreams.
+---
+Add the human toggle: a state file plus a `ccswitch` CLI. State lives at ~/.config/ccswitch/state.json as {"active": "<profile>"}, read by the proxy as the default-profile fallback. Implement `ccswitch` with subcommands: `use <profile>` (validate the name against config.toml, then write state.json), `status` (print the active profile and its resolved upstream), and `list` (print every profile with its kind + upstream). The CLI reads config.toml + state.json, writes only the active-profile default, and never touches secrets. Acceptance: (1) `ccswitch use openai` then `ccswitch status` shows openai and its upstream; (2) `ccswitch list` shows every configured profile; (3) `ccswitch use <unknown>` errors and writes nothing; (4) the running proxy picks up the new default on the next request (state.json read per request, no restart); (5) pytest covers use/status/list and the unknown-profile error.
+---
+Finalize per-dispatch selection for Commander and apply model_map end to end. Confirm the proxy honors a per-process CCPROXY_PROFILE (set in a dispatched subprocess's env) and a per-request X-CCProxy-Profile header, both overriding the global state default — this is how Commander pins a backend per agent dispatch without a global toggle that would race under concurrent multi-coder / pipeline runs. Apply the resolved profile's model_map so the client's requested model (e.g. a haiku-class vs a sonnet-class model) maps to that profile's configured upstream model. Add a "Using claude-proxy with Commander" section to README: point ANTHROPIC_BASE_URL at the proxy and set CCPROXY_PROFILE per dispatched subprocess (e.g. a cheap/local profile for tester/estimator/docs-only, the subscription anthropic profile for coder). Acceptance: (1) two concurrent runs with different CCPROXY_PROFILE values in their environments hit different backends with no interference; (2) a per-request X-CCProxy-Profile overrides both the env and the state default; (3) model_map rewrites the requested model to the upstream model for the chosen profile; (4) README documents the Commander wiring; (5) pytest covers env-vs-header-vs-default precedence under concurrency and model_map application.
+```
+
+## Notes
+
+- **This is the MVP closer (M0–M4 complete).** After it: stable endpoint, instant
+  switch, both backends doing real tool-using Claude Code work, no restarts.
+- **Per-dispatch env/header is the load-bearing mechanism**, not the global
+  state file. Commander runs agents concurrently (multi-coder pool + pipeline),
+  so a single mutable default would race — `ccswitch`/state.json is only the
+  human's convenience default for solo `claude -p`.
+- **Order:** 1 (profiles) → 2 (resolution) and 3 (CLI) → 4 (Commander wiring +
+  model_map). Ticket 4 depends on 1–3.
+- **Secrets:** only ever via `api_key_env` indirection; never write a key to
+  config.toml, state.json, or logs.
+- **Prereqs already covered** in the docs: the design-docs guard (PRODUCT.md +
+  DESIGN.md) and `scaffold_project.py` standard layout must be in place for
+  Commander to run these sprints at all.
+- **Headless project.** Design Refs from DESIGN.md "Intent"; UAT via `ccswitch`
+  commands + `curl`/`claude -p`, MANUAL (no browser `[agent-test]`).
+
+## Posted issues
+
+| # | Title | Size |
+|---|-------|------|
+| _pending_ | | |

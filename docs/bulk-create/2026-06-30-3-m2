@@ -1,0 +1,51 @@
+# M2 — Streaming (SSE) on the OpenAI path
+
+**Date:** 2026-06-30
+**Sprint label:** NEW
+**Default labels:** enhancement, backend
+**Status:** drafted
+
+Milestone M2: make the OpenAI path stream. Consume the upstream's
+`/chat/completions` SSE deltas and re-emit them as a correct Anthropic Messages
+event stream (message_start → content_block_* → message_delta → message_stop),
+so `CCPROXY_PROFILE=openai claude -p` shows tokens live instead of one buffered
+reply. Text-only streaming this milestone; streamed tool calls are part of M3.
+Depends on M1 (translation core) and M0 (the anthropic profile keeps its raw SSE
+passthrough). The Anthropic streaming protocol is specific, so the emitter and
+the upstream parser are built and tested as decoupled pieces first.
+
+## Prompts
+
+Paste one code block into the Bulk Create textarea. Prompts are `---`-separated.
+
+```
+Add an Anthropic streaming event emitter (e.g. `services/sse.py`) that, given a stream of text deltas plus a final stop_reason and usage, yields the Anthropic Messages streaming sequence with correct SSE framing — each event is an `event: <type>` line followed by a `data: <json>` line and a blank line. The sequence: message_start (message skeleton: id, type "message", role "assistant", model, empty content[], input-token usage) → content_block_start (index 0, content_block {type:"text", text:""}) → one content_block_delta per text delta ({type:"text_delta", text:...}) → content_block_stop (index 0) → message_delta (delta {stop_reason, stop_sequence:null}, usage {output_tokens}) → message_stop. Support emitting periodic `ping` events. Keep it a pure async generator decoupled from HTTP so it is unit-testable. Acceptance: (1) feeding a few text deltas + stop_reason end_turn yields exactly message_start → content_block_start → N×content_block_delta → content_block_stop → message_delta → message_stop, each a well-formed event:/data: pair; (2) message_start carries id/role/model and each content_block_delta carries a text_delta payload; (3) message_delta carries stop_reason and output_tokens; (4) pytest parses the emitted SSE text and asserts event order and JSON shapes.
+---
+Add an OpenAI streaming consumer that parses a `/chat/completions` SSE stream into normalized events. Read the upstream byte/line stream, buffer partial lines, parse each `data: {json}` line (ignoring blank keepalive/comment lines), terminate on the `data: [DONE]` sentinel, and yield: incremental assistant text from choices[0].delta.content, the finish_reason when present, and a usage object if the upstream sends one. Be robust to role-only or empty-content deltas and to JSON split across chunk boundaries. Acceptance: (1) a sequence of OpenAI SSE chunks yields the concatenated text in order plus the final finish_reason; (2) `[DONE]` terminates cleanly; (3) a JSON line split across two read boundaries is reassembled correctly; (4) pytest drives the parser with chunked byte inputs (including a mid-JSON split) and asserts the yielded text and finish_reason.
+---
+Bridge the OpenAI stream consumer to the Anthropic emitter for text streaming, in `services/translator.py`. Consume the normalized OpenAI stream events (text deltas, finish_reason, usage) and drive the Anthropic emitter: forward each text delta as a content_block_delta, and at end-of-stream finalize with stop_reason mapped from finish_reason (stop → end_turn, length → max_tokens, tool_calls → tool_use [reserved for M3]) and output_tokens from usage (or a counted fallback when the upstream omits usage). The model and message id flow through from request/response context. Acceptance: (1) an OpenAI streamed completion converts into a correct Anthropic event sequence carrying the streamed text; (2) finish_reason length surfaces as stop_reason max_tokens in message_delta; (3) output_tokens is reported (upstream value or counted fallback); (4) pytest feeds a stub OpenAI stream and asserts the resulting Anthropic events reconstruct the full text and the stop_reason.
+---
+Wire streaming into `POST /v1/messages` for openai mode and remove the M1 non-stream fallback. When CCPROXY_PROFILE=openai and the client requests stream:true, POST the translated request upstream with stream:true and return a FastAPI StreamingResponse(media_type "text/event-stream") that emits the translated Anthropic event stream as upstream deltas arrive — no buffering. Cancel and close the upstream stream if the client disconnects. Emit periodic ping events so a slow first token doesn't drop the connection. If the upstream errors mid-stream, stop cleanly: emit an Anthropic `error` event when content has already started, otherwise return a normal error response. The anthropic profile keeps the M0 raw SSE passthrough unchanged. Acceptance: (1) `CCPROXY_PROFILE=openai claude -p` streams tokens live (first token arrives before completion); (2) the M1 "stream forced to non-stream" limitation is gone; (3) client disconnect closes the upstream connection (no leak); (4) a mid-stream upstream failure terminates the response cleanly with no 500 traceback; (5) pytest streams end-to-end through the handler against a stub OpenAI SSE upstream and asserts incremental Anthropic events.
+```
+
+## Notes
+
+- **Order:** tickets 1 and 2 are independent → 3 bridges them → 4 wires the
+  handler. Build and test 1+2 in isolation before 3.
+- **Anthropic protocol is exact.** Event order and the `event:`/`data:` framing
+  matter — Claude Code's client will choke on a malformed sequence. Test by
+  parsing the emitted SSE, not by eyeballing.
+- **Reuse M0's disconnect handling** for closing the upstream stream; don't
+  reinvent it.
+- **Scope guard:** text streaming only. Streamed tool-call fragments are M3 —
+  the tool_use → tool_use streaming events extend this same bridge there.
+- **Headless project.** Design Refs from DESIGN.md "Intent"; UAT via `curl -N`
+  (or `claude -p`) observing live chunks, MANUAL (no browser `[agent-test]`).
+- **Optional reference:** teer823/claude-proxy's streaming handler is a
+  structural model — adapt, don't depend.
+
+## Posted issues
+
+| # | Title | Size |
+|---|-------|------|
+| _pending_ | | |

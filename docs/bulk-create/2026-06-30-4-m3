@@ -1,0 +1,54 @@
+# M3 — Tool calls (make-or-break)
+
+**Date:** 2026-06-30
+**Sprint label:** NEW
+**Default labels:** enhancement, backend
+**Status:** drafted
+
+Milestone M3: full tool-call translation in both directions, streaming included.
+This is the milestone that makes Claude Code actually usable on the OpenAI path —
+its whole loop is tool calls (read file, edit, run bash). Without it you get a
+model that can chat but can't do the job. Budget accordingly: this is where most
+of the real effort and most of the bugs live, and the subtle part is
+**tool_call_id pairing** across the request direction. Depends on M1
+(translation) and M2 (streaming). Milestone exit is an end-to-end real task on a
+function-calling-capable upstream, validated manually.
+
+## Prompts
+
+Paste one code block into the Bulk Create textarea. Prompts are `---`-separated.
+
+```
+Translate Anthropic tool definitions and tool_choice into OpenAI form inside `to_openai_request`. Map each Anthropic tool {name, description, input_schema} to an OpenAI tool {type:"function", function:{name, description, parameters: input_schema}} — input_schema is already JSON Schema, so pass it straight through as parameters. Map tool_choice: Anthropic "auto" → OpenAI "auto"; "any" → "required"; {type:"tool", name:X} → {type:"function", function:{name:X}}; absent → omit both tools handling and tool_choice. Acceptance: (1) a request with two tools produces two OpenAI function tools with names, descriptions, and JSON-Schema parameters intact; (2) each tool_choice variant (auto/any/named/absent) maps correctly; (3) a request with no tools omits the fields entirely; (4) pytest covers each mapping.
+---
+Translate OpenAI tool_calls into Anthropic tool_use in `from_openai_response` (non-streaming). When choices[0].message.tool_calls is present, emit one Anthropic tool_use content block per call — {type:"tool_use", id: <tool_call id>, name: function.name, input: JSON-parsed function.arguments} — preserving any assistant text as a text block before the tool_use blocks, and set stop_reason "tool_use". Fail safe on malformed/partial arguments JSON (use {} input + a logged warning) rather than raising. Acceptance: (1) an OpenAI response requesting one tool becomes an Anthropic response with a tool_use block carrying id/name/parsed input and stop_reason tool_use; (2) assistant text alongside a tool call is preserved as a leading text block; (3) multiple tool_calls produce multiple tool_use blocks; (4) invalid arguments JSON degrades to {} input without crashing; (5) pytest covers single, multi, with-text, and malformed cases.
+---
+Translate Anthropic tool_result turns into OpenAI tool messages in `to_openai_request`, keeping the conversation well-formed for the upstream. An assistant turn containing tool_use blocks must become an OpenAI assistant message carrying `tool_calls` (each: id, function.name, function.arguments = JSON-stringified input), reconstructed so the upstream sees the call that the results answer. Each Anthropic user-turn tool_result block becomes an OpenAI message {role:"tool", tool_call_id: <matching tool_use id>, content: <result text/JSON>}. Preserve ordering so each tool message immediately follows the assistant tool_calls message it answers, and match ids exactly. Acceptance: (1) a conversation [user text → assistant tool_use → user tool_result → …] translates into OpenAI [user, assistant(with tool_calls), tool, …] with matching tool_call_ids; (2) tool_result content is carried into the tool message; (3) multiple parallel tool_use/tool_result in one turn map to multiple tool_calls / tool messages with correct id pairing; (4) pytest covers single and parallel tool round-trips and asserts id matching.
+---
+Extend the M2 streaming bridge to handle streamed tool calls. Parse OpenAI streamed tool_call fragments (choices[0].delta.tool_calls[] with an index, an id/name on the first fragment, and incremental function.arguments strings) and emit the Anthropic streaming events for a tool_use block: on the first fragment for an index, content_block_start {index, content_block:{type:"tool_use", id, name, input:{}}}; for each arguments fragment, content_block_delta {type:"input_json_delta", partial_json:<fragment>}; content_block_stop when the call ends; and finalize message_delta with stop_reason "tool_use". Interleave correctly with any open text block (close the text block before opening the tool_use block; track content-block indices). Acceptance: (1) a streamed OpenAI tool call yields content_block_start(tool_use) → input_json_delta… → content_block_stop and message_delta stop_reason tool_use; (2) the partial_json fragments concatenate to the full arguments JSON; (3) a response with leading text then a tool call emits a text block then a tool_use block with correct indices; (4) pytest feeds a stub streamed tool call and asserts the Anthropic event sequence and reconstructed arguments.
+---
+Add an OPTIONAL XML tool-call fallback for OpenAI-compatible upstreams that lack native function calling, gated by env CCPROXY_TOOL_MODE (native [default] | xml). In xml mode: inject the tool definitions into the system prompt as an XML tool spec instructing the model to emit tool calls as XML, then parse XML tool-call blocks out of the model's text output (both streaming and non-streaming) back into Anthropic tool_use blocks; everything downstream of translation is unchanged. Native mode stays the default and fully intact. This ticket is deferrable — only needed for upstreams without function calling. Acceptance: (1) with CCPROXY_TOOL_MODE=xml against a stub upstream that echoes an XML tool call, the proxy returns a valid Anthropic tool_use block; (2) native mode is unaffected and remains the default; (3) malformed XML degrades to plain text (no crash); (4) pytest covers an xml-mode round-trip and proves native mode is unchanged. Milestone exit (validate manually, not in this ticket): with a function-calling-capable upstream in native mode, Claude Code completes a real task end-to-end on the OpenAI path — reads a file, proposes and applies an edit, and runs a shell command.
+```
+
+## Notes
+
+- **This is the make-or-break milestone.** Test with an actual edit + bash task
+  through `claude -p`, not just unit round-trips — the integration is where it
+  breaks.
+- **Order:** 1 → 2 → 3 give non-streaming tools end to end; 4 (streaming tools)
+  depends on M2 plus tickets 1–3; 5 (XML) is optional and can be deferred or
+  dropped if your upstream supports native function calling.
+- **tool_call_id pairing (ticket 3) is the subtle part.** Anthropic carries ids
+  on tool_use/tool_result; OpenAI carries them on tool_calls/tool messages. A
+  mismatch silently breaks multi-step agent loops — cover parallel calls in
+  tests.
+- **Headless project.** Design Refs from DESIGN.md "Intent"; UAT steps are
+  CLI/`claude -p` task runs, MANUAL (no browser `[agent-test]`).
+- **Optional reference:** teer823/claude-proxy's tool translation + XML mode are
+  a structural model — adapt, don't depend.
+
+## Posted issues
+
+| # | Title | Size |
+|---|-------|------|
+| _pending_ | | |
