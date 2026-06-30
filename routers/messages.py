@@ -496,6 +496,13 @@ async def _handle_openai_mode(
         },
     )
 
+    if upstream_resp.status_code >= 400:
+        return Response(
+            content=upstream_resp.content,
+            status_code=upstream_resp.status_code,
+            media_type="application/json",
+        )
+
     openai_resp = ChatResponse(**json.loads(upstream_resp.content))
     anthropic_resp = from_openai_response(openai_resp)
 
