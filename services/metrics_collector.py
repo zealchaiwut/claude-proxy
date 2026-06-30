@@ -91,7 +91,6 @@ class MetricsCollector:
             drift_out = sample[8] if len(sample) > 8 else None
             profile_kind = sample[9] if len(sample) > 9 else None
             cache_read = sample[10] if len(sample) > 10 else None
-            cache_creation = sample[11] if len(sample) > 11 else None
             cache_miss = sample[12] if len(sample) > 12 else None
             if profile not in accum:
                 accum[profile] = {
