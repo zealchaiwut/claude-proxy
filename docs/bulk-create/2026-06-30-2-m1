@@ -1,0 +1,52 @@
+# M1 — OpenAI-compatible translation (non-streaming)
+
+**Date:** 2026-06-30
+**Sprint label:** NEW
+**Default labels:** enhancement, backend
+**Status:** drafted
+
+Milestone M1: add Mode B — translate the Anthropic Messages API to an
+OpenAI-compatible Chat Completions backend and back — for a single,
+env-selected upstream, **non-streaming and text-only**. This is the translation
+core. Streaming is M2; tool calls (the make-or-break for real Claude Code use)
+are M3; the full config.toml profile system and per-dispatch selection are M4.
+Selection here is a tiny env switch (`CCPROXY_PROFILE`) so M4 can generalize it.
+Depends on M0 (the passthrough path stays the `anthropic` profile, unchanged).
+
+## Prompts
+
+Paste one code block into the Bulk Create textarea. Prompts are `---`-separated.
+
+```
+Add Pydantic schemas for both API shapes that the translation tickets consume. Create `schemas/anthropic.py` modeling the Messages API — a MessagesRequest (model, system as str OR list of text blocks, messages[], max_tokens, stream, optional tools, tool_choice, thinking) and a MessagesResponse (id, role, content blocks, stop_reason, usage), with content-block types for text, image, tool_use, and tool_result — and `schemas/openai.py` modeling Chat Completions — a ChatRequest (model, messages[], max_tokens, stream, optional tools, tool_choice) and a ChatResponse (choices[].message, finish_reason, usage). Model only the fields milestones M1–M3 need, and ALLOW unknown/extra fields rather than rejecting them (Claude Code and upstreams send more than we model). Acceptance: (1) representative Anthropic and OpenAI request/response JSON parse into the models without dropping the modeled fields; (2) payloads carrying unknown extra fields parse without raising; (3) pytest round-trips sample payloads through the models, including a message with a tool_use block, a tool_result block, and an image block.
+---
+Add `services/translator.py` with `to_openai_request(anthropic_req, model)` translating an Anthropic MessagesRequest into an OpenAI ChatRequest for non-streaming, text-only conversations. Map Anthropic `system` (string OR list of text blocks) into a single leading OpenAI system message; map each user/assistant turn, flattening text content blocks into OpenAI message `content` while preserving message order and roles; carry max_tokens; and set the OpenAI `model` from the passed-in model argument (sourced from env OPENAI_MODEL later), NOT from the client's requested model. Do not set stream. Tool/tool_use/tool_result and image blocks are deferred to M3 — for this milestone translate text-only and handle their presence gracefully (skip non-text blocks and record a one-line documented limitation rather than crashing). Acceptance: (1) a system prompt plus a multi-turn text conversation translate with correct roles, order, and the env-provided model; (2) max_tokens is carried through; (3) messages containing image or tool blocks do not crash translation (non-text blocks skipped per the documented M1 limitation); (4) pytest covers system-as-string, system-as-blocks, and a multi-turn text conversation.
+---
+Add `from_openai_response(openai_resp)` to `services/translator.py`, translating a non-streaming OpenAI ChatResponse into an Anthropic MessagesResponse. Place the assistant message text into a single Anthropic `text` content block; map finish_reason → stop_reason (stop → end_turn, length → max_tokens, tool_calls → tool_use [value reserved for M3], anything else → end_turn); map usage (prompt_tokens → input_tokens, completion_tokens → output_tokens); and synthesize the id, role ("assistant"), type ("message"), and model fields Claude Code expects on a Messages response. Acceptance: (1) a normal OpenAI completion becomes a valid Anthropic MessagesResponse carrying one text block and stop_reason end_turn; (2) finish_reason "length" maps to stop_reason max_tokens; (3) usage tokens map to input_tokens/output_tokens correctly; (4) pytest covers each mapping including the usage and finish_reason cases.
+---
+Wire Mode B into `POST /v1/messages` behind an env switch, and add a count_tokens estimate. Read CCPROXY_PROFILE (default "anthropic"): when "anthropic", use the M0 passthrough unchanged; when "openai", translate the incoming request with to_openai_request (model from env OPENAI_MODEL), POST it to `${OPENAI_BASE_URL}/chat/completions` with header Authorization: Bearer ${OPENAI_API_KEY}, then translate the upstream reply with from_openai_response and return it as an Anthropic MessagesResponse. Handle NON-streaming only this milestone: if the client sets stream:true while in openai mode, request a non-streaming completion upstream and return one complete Anthropic message (real SSE is M2) — document this limitation. Also implement `/v1/messages/count_tokens` for openai mode: return a local estimate {"input_tokens": N} using a dependency-light heuristic (e.g. ~chars/4 over the rendered messages; tiktoken optional) so Claude Code's pre-flight does not error when not passing through to Anthropic; in anthropic mode keep the M0 passthrough. Read OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL from env only and never log them. Acceptance: (1) with CCPROXY_PROFILE=openai a non-streaming /v1/messages request returns a correct answer sourced from the OpenAI-compatible upstream; (2) with CCPROXY_PROFILE=anthropic behavior is byte-for-byte identical to M0 passthrough; (3) count_tokens returns a plausible estimate in openai mode and still passes through in anthropic mode; (4) stream:true in openai mode returns a single complete message without crashing, with the limitation documented; (5) pytest covers profile routing (both modes) and the full openai round-trip against a stub OpenAI-compatible upstream.
+```
+
+## Notes
+
+- **Env switch, not the full profile system.** M1 selection is just
+  CCPROXY_PROFILE + OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL. Keep it
+  minimal; M4 replaces it with config.toml profiles and per-dispatch resolution.
+  Don't build the profile loader here.
+- **Scope guard:** non-streaming + text only. Do NOT try to make Claude Code
+  fully usable on the OpenAI path in this batch — that needs M2 (streaming) and
+  M3 (tools). These tickets are the translation core only.
+- **Order:** ticket 1 (schemas) → 2 (request) and 3 (response) → 4 (wire-up).
+  Tickets 2 and 3 are independent of each other once schemas land.
+- **Headless project.** Design Refs reference DESIGN.md "Intent"; UAT steps are
+  `curl`/CLI based and MANUAL (no browser `[agent-test]` tags).
+- **Test seam.** Stub the OpenAI upstream (monkeypatch httpx or a local ASGI app)
+  so translation round-trips are deterministic and offline.
+- **Optional reference:** teer823/claude-proxy `services/translator.py` and
+  `schemas/` are a structural model — adapt, don't depend.
+
+## Posted issues
+
+| # | Title | Size |
+|---|-------|------|
+| _pending_ | | |

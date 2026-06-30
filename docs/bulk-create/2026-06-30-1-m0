@@ -1,0 +1,54 @@
+# M0 — Passthrough proxy skeleton (Anthropic mode)
+
+**Date:** 2026-06-30
+**Sprint label:** NEW
+**Default labels:** enhancement, backend
+**Status:** drafted
+
+Milestone M0 of claude-proxy: stand up a local FastAPI proxy on
+`127.0.0.1:8788` that **transparently relays** Claude Code's API calls to
+`https://api.anthropic.com`, forwarding the caller's own auth/version headers
+**byte-for-byte**. Transparency is the entire point of this milestone: because
+the proxy never touches the body or the auth header, whatever login Claude Code
+holds — a Pro/Max **subscription** OAuth bearer or an API key — reaches Anthropic
+unchanged, so `ANTHROPIC_BASE_URL=http://localhost:8788 claude -p "hi"` behaves
+identically to talking to Anthropic directly. This also lays the routing/forward
+foundation that M1+ extend.
+
+## Prompts
+
+Paste one code block into the Bulk Create textarea. Prompts are `---`-separated.
+
+```
+Create the claude-proxy FastAPI skeleton. Add a `pyproject.toml` (or requirements.txt) declaring fastapi, uvicorn[standard], httpx, and pydantic; a `main.py` exposing a FastAPI app plus a uvicorn entrypoint bound to 127.0.0.1:8788, with host/port overridable via env CCPROXY_HOST / CCPROXY_PORT. Add a Settings object (pydantic settings or simple env reads) that loads UPSTREAM_BASE_URL (default https://api.anthropic.com) and UPSTREAM_READ_TIMEOUT (default 300.0 seconds). Add `GET /health` returning JSON {"status":"ok","upstream":<upstream base url>}. Establish the module layout later tickets extend: `routers/` for request handlers and `services/` for HTTP forwarding. No proxying logic yet — just the app, config, and health. Acceptance: (1) starting the app binds 127.0.0.1:8788; (2) `curl localhost:8788/health` returns 200 with status "ok" and the configured upstream; (3) CCPROXY_HOST, CCPROXY_PORT, and UPSTREAM_BASE_URL env overrides take effect; (4) pytest boots the app via httpx ASGITransport (or TestClient) and asserts the /health shape and that an env override of UPSTREAM_BASE_URL is reflected.
+---
+Implement transparent NON-streaming passthrough for `POST /v1/messages`. Forward the request to `${UPSTREAM_BASE_URL}/v1/messages`, copying the raw request body unchanged and forwarding inbound headers VERBATIM — especially Authorization, x-api-key, anthropic-version, anthropic-beta, and content-type — so the caller's subscription OAuth bearer or API key reaches Anthropic untouched. Strip only hop-by-hop headers (Host, Connection, Keep-Alive, Proxy-Authenticate, Proxy-Authorization, TE, Trailer, Transfer-Encoding, Upgrade) and Content-Length (let httpx recompute), and set Host to the upstream. Return the upstream status code, JSON body, and safe response headers to the caller unchanged. Use one shared httpx.AsyncClient configured with UPSTREAM_READ_TIMEOUT. Never log header values or request/response bodies (they carry secrets and user content). Acceptance: (1) a non-streaming /v1/messages call is forwarded and the upstream JSON body + status are returned verbatim; (2) Authorization, x-api-key, anthropic-version, and anthropic-beta arrive at the upstream exactly as received; (3) hop-by-hop headers are not forwarded and Host is rewritten to the upstream; (4) pytest points the proxy at a stub upstream (monkeypatched httpx or a local ASGI echo app) and asserts headers + body pass through unchanged and the status code is propagated.
+---
+Add STREAMING passthrough for `POST /v1/messages` when the caller requests it (request body has "stream": true, or Accept: text/event-stream). Use httpx's streaming client and FastAPI StreamingResponse to relay the upstream response incrementally — forward SSE bytes as they arrive without buffering the whole body — preserving the upstream content-type (text/event-stream) and status. Forward request headers the same way as the non-streaming path (reuse that helper). Ensure the upstream connection is closed cleanly when the client disconnects mid-stream. Acceptance: (1) a streaming request yields the upstream SSE event stream chunk-by-chunk with content-type text/event-stream; (2) the body is not buffered into a single response — the first event reaches the client before the stream completes; (3) a client disconnect closes the upstream stream (no leaked connections); (4) pytest streams from a stub SSE upstream and asserts events arrive incrementally and byte-intact.
+---
+Extend passthrough to the remaining Claude Code endpoints and harden upstream errors. Proxy `POST /v1/messages/count_tokens` and `GET /v1/models` through the same transparent forwarder, and add a generic catch-all that forwards any other `/v1/{path:path}` for any HTTP method to the upstream so future Claude Code calls never 404 at the proxy. On an upstream connection error or read timeout, return 502 (connection) or 504 (timeout) with a small JSON error body — no stack traces, no secrets — rather than a bare 500. Document in README.md how to connect Claude Code: set `ANTHROPIC_BASE_URL=http://localhost:8788` and keep the existing ANTHROPIC_API_KEY / subscription login as-is. Acceptance: (1) count_tokens and models are proxied and return the upstream result; (2) an unknown /v1/* path is forwarded, not 404'd by the proxy; (3) an upstream timeout surfaces as 504 and a connection failure as 502, each with a clean JSON error; (4) README documents the ANTHROPIC_BASE_URL wiring; (5) pytest covers count_tokens passthrough and the timeout→504 path against a stub upstream.
+```
+
+## Notes
+
+- **Order:** ticket 1 → 2 → (3, 4). Tickets 3 and 4 build on the header-forward
+  helper introduced in ticket 2; keep that helper shared.
+- **Transparency is the contract.** In Anthropic mode the proxy must NOT parse,
+  validate, or rewrite the body or the auth header — byte-for-byte forwarding is
+  what lets the subscription OAuth token survive the hop. Resist "helpful"
+  normalization.
+- **Headless project.** There is no UI: Design Refs should reference DESIGN.md's
+  "Intent" / CLI-output conventions, and UAT steps are `curl`/CLI based and
+  MANUAL (no browser `[agent-test]` tags — the design gate skips with no
+  frontend).
+- **Test seam.** Inject the httpx client and upstream base URL so tests can stub
+  the upstream offline; keep handlers thin. The tester gate runs pytest on
+  changed test files, so each ticket's tests should stand alone.
+- **Optional reference:** teer823/claude-proxy `main.py` + `services/proxy.py`
+  are a structural model for the forward/stream helpers — adapt, don't depend.
+
+## Posted issues
+
+| # | Title | Size |
+|---|-------|------|
+| _pending_ | | |
