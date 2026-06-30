@@ -1,0 +1,28 @@
+# claude-proxy example configuration
+# Copy to config.toml and edit as needed.
+# Set API keys via environment variables (see .env.example) — never put secrets here.
+
+[server]
+host = "127.0.0.1"
+port = 8788
+
+# --- Anthropic passthrough profile ---
+# Forwards requests byte-for-byte to the Anthropic API.
+[profiles.anthropic]
+kind = "passthrough"
+upstream = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"   # export ANTHROPIC_API_KEY=<your-key>
+
+# --- OpenAI-compatible profile ---
+# Translates Anthropic /v1/messages requests to OpenAI /chat/completions format.
+[profiles.openai]
+kind = "openai"
+upstream = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"      # export OPENAI_API_KEY=<your-key>
+model = "gpt-4o"
+# timeout = 120    # placeholder: per-request timeout in seconds (not yet wired)
+# retry = 3        # placeholder: retry count on transient failures (not yet wired)
+
+[profiles.openai.pricing]
+input_per_mtok = 5.0
+output_per_mtok = 15.0

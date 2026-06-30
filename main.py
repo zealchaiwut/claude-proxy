@@ -1,11 +1,13 @@
+import sys
 from contextlib import asynccontextmanager
 
 import httpx
 import uvicorn
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 
-from config import Settings, get_settings
+from config import get_settings
 from profiles import ProfileRegistry, get_or_load_config
+from routers.health import router as health_router
 from routers.messages import router as messages_router
 from routers.metrics import router as metrics_router
 from routers.models import router as models_router
@@ -34,19 +36,24 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(health_router)
 app.include_router(messages_router)
 app.include_router(metrics_router)
 app.include_router(models_router)
 app.include_router(passthrough_router)
 
 
-@app.get("/health")
-def health(settings: Settings = Depends(get_settings)):
-    return {"status": "ok", "upstream": settings.upstream_base_url}
+def main() -> None:
+    """Console entrypoint: read config.toml and start uvicorn."""
+    proxy_config, from_file = get_or_load_config()
+    if not from_file:
+        print(
+            "warning: config.toml not found — using environment variable defaults.\n"
+            "Copy config.example.toml to config.toml to configure the server.",
+            file=sys.stderr,
+        )
+    uvicorn.run("main:app", host=proxy_config.server.host, port=proxy_config.server.port)
 
 
 if __name__ == "__main__":
-    proxy_config, _ = get_or_load_config()
-    host = proxy_config.server.host
-    port = proxy_config.server.port
-    uvicorn.run("main:app", host=host, port=port)
+    main()
