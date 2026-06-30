@@ -124,6 +124,35 @@ def extract_text_from_sse(data: bytes) -> str:
     return text
 
 
+def extract_anthropic_cache_usage_from_response(response_json: dict[str, Any]) -> tuple[int, int]:
+    """Return (cache_read_input_tokens, cache_creation_input_tokens) from Anthropic response JSON."""
+    usage = response_json.get("usage") or {}
+    read = int(usage.get("cache_read_input_tokens") or 0)
+    creation = int(usage.get("cache_creation_input_tokens") or 0)
+    return read, creation
+
+
+def extract_anthropic_cache_usage_from_sse(data: bytes) -> tuple[int, int]:
+    """Return (cache_read_input_tokens, cache_creation_input_tokens) from Anthropic SSE message_start."""
+    import json as _json
+
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        raw = line[len("data:"):].strip()
+        try:
+            payload = _json.loads(raw)
+        except (_json.JSONDecodeError, ValueError):
+            continue
+        if payload.get("type") == "message_start":
+            usage = payload.get("message", {}).get("usage", {})
+            read = int(usage.get("cache_read_input_tokens") or 0)
+            creation = int(usage.get("cache_creation_input_tokens") or 0)
+            return read, creation
+    return 0, 0
+
+
 def parse_anthropic_sse_usage(
     data: bytes,
     body_json: dict[str, Any],

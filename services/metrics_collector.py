@@ -56,10 +56,18 @@ class MetricsCollector:
         cost_usd: float = 0.0,
         token_drift_input: int | None = None,
         token_drift_output: int | None = None,
+        profile_kind: str | None = None,
+        cache_read_input_tokens: int | None = None,
+        cache_creation_input_tokens: int | None = None,
+        cache_miss_estimate: int | None = None,
     ) -> None:
         ts = time.monotonic()
         with self._lock:
-            self._samples.append((ts, profile, status, latency_ms, input_tokens, output_tokens, cost_usd, token_drift_input, token_drift_output))
+            self._samples.append((
+                ts, profile, status, latency_ms, input_tokens, output_tokens, cost_usd,
+                token_drift_input, token_drift_output,
+                profile_kind, cache_read_input_tokens, cache_creation_input_tokens, cache_miss_estimate,
+            ))
 
     def snapshot(self) -> dict:
         """Return a dict keyed by profile name with aggregated stats.
@@ -81,6 +89,9 @@ class MetricsCollector:
             _ts, profile, status, latency_ms, input_tokens, output_tokens, cost_usd = sample[:7]
             drift_in = sample[7] if len(sample) > 7 else None
             drift_out = sample[8] if len(sample) > 8 else None
+            profile_kind = sample[9] if len(sample) > 9 else None
+            cache_read = sample[10] if len(sample) > 10 else None
+            cache_miss = sample[12] if len(sample) > 12 else None
             if profile not in accum:
                 accum[profile] = {
                     "request_count": 0,
@@ -91,10 +102,15 @@ class MetricsCollector:
                     "_latencies": [],
                     "_drift_inputs": [],
                     "_drift_outputs": [],
+                    "_profile_kind": None,
+                    "_cache_hit_count": 0,
+                    "_total_cache_miss_tokens": 0,
                 }
             entry = accum[profile]
             entry["request_count"] += 1
             entry["_latencies"].append(latency_ms)
+            if profile_kind is not None and entry["_profile_kind"] is None:
+                entry["_profile_kind"] = profile_kind
             is_error = not (200 <= status < 300)
             if is_error:
                 entry["error_count"] += 1
@@ -106,14 +122,20 @@ class MetricsCollector:
                 entry["_drift_inputs"].append(drift_in)
             if drift_out is not None:
                 entry["_drift_outputs"].append(drift_out)
+            if cache_read is not None and cache_read > 0:
+                entry["_cache_hit_count"] += 1
+            if cache_miss is not None:
+                entry["_total_cache_miss_tokens"] += cache_miss
 
         result = {}
         for profile, entry in accum.items():
             lats = sorted(entry["_latencies"])
             drift_ins = entry["_drift_inputs"]
             drift_outs = entry["_drift_outputs"]
-            result[profile] = {
-                "request_count": entry["request_count"],
+            kind = entry["_profile_kind"]
+            req_count = entry["request_count"]
+            profile_result: dict = {
+                "request_count": req_count,
                 "error_count": entry["error_count"],
                 "total_input_tokens": entry["total_input_tokens"],
                 "total_output_tokens": entry["total_output_tokens"],
@@ -125,4 +147,13 @@ class MetricsCollector:
                 "mean_drift_output": sum(drift_outs) / len(drift_outs) if drift_outs else None,
                 "abs_mean_drift_output": sum(abs(d) for d in drift_outs) / len(drift_outs) if drift_outs else None,
             }
+            if kind == "passthrough":
+                profile_result["cache_hit_ratio"] = (
+                    entry["_cache_hit_count"] / req_count if req_count else 0.0
+                )
+            elif kind == "openai":
+                total_miss = entry["_total_cache_miss_tokens"]
+                profile_result["total_cache_miss_tokens"] = total_miss
+                profile_result["est_cache_gap_cost_usd"] = total_miss * _COST_PER_INPUT_TOKEN
+            result[profile] = profile_result
         return result

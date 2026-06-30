@@ -398,11 +398,7 @@ def test_heuristic_tokenizer_matches_existing_count_input_tokens():
 
 def test_no_tiktoken_import_when_heuristic_is_default(monkeypatch):
     """AC9: tiktoken is never imported when tokenizer defaults to heuristic."""
-    import services.tokenizer as tok_mod
     from services.tokenizer import get_tokenizer
-
-    imported = []
-    real_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else None
 
     # Verify that get_tokenizer("heuristic") does not touch tiktoken
     with patch.dict(sys.modules, {"tiktoken": None}):

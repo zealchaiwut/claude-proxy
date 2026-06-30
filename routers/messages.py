@@ -17,6 +17,8 @@ from services.cost_accounting import (
     compute_est_cost,
     count_input_tokens,
     count_output_tokens,
+    extract_anthropic_cache_usage_from_response,
+    extract_anthropic_cache_usage_from_sse,
     extract_text_from_sse,
     extract_upstream_usage_from_sse,
     extract_usage_from_response,
@@ -307,6 +309,15 @@ def _attach_logging(
                     drift_input = est_input_tokens - upstream_in
                     drift_output = est_out - upstream_out
 
+                # Extract cache metrics based on profile kind
+                _profile_kind = log_meta.get("profile_kind")
+                cache_read = cache_creation = cache_miss = None
+                if _profile_kind == "passthrough":
+                    cache_read, cache_creation = extract_anthropic_cache_usage_from_sse(buf)
+                elif _profile_kind == "openai":
+                    from services.tokenizer import count_messages_tokens
+                    cache_miss = count_messages_tokens(body_json)
+
                 record = request_logger.make_record(
                     profile_name=profile_name,
                     requested_model=requested_model,
@@ -317,6 +328,9 @@ def _attach_logging(
                     streamed=True,
                     token_drift_input=drift_input,
                     token_drift_output=drift_output,
+                    cache_read_input_tokens=cache_read,
+                    cache_creation_input_tokens=cache_creation,
+                    cache_miss_estimate=cache_miss,
                     **log_meta,
                 )
                 request_logger.emit(record)
@@ -329,6 +343,8 @@ def _attach_logging(
     else:
         # Compute drift for non-streaming response
         drift_input = drift_output = None
+        cache_read = cache_creation = cache_miss = None
+        _profile_kind = log_meta.get("profile_kind")
         try:
             raw = response.body if hasattr(response, "body") else response.content
             resp_json = json.loads(raw)
@@ -342,8 +358,13 @@ def _attach_logging(
                 est_out = count_output_tokens(text)
                 drift_input = est_input_tokens - upstream_in
                 drift_output = est_out - upstream_out
+            if _profile_kind == "passthrough":
+                cache_read, cache_creation = extract_anthropic_cache_usage_from_response(resp_json)
         except Exception:
             pass
+        if _profile_kind == "openai":
+            from services.tokenizer import count_messages_tokens
+            cache_miss = count_messages_tokens(body_json)
 
         latency_ms = (time.monotonic() - start) * 1000
         record = request_logger.make_record(
@@ -356,6 +377,9 @@ def _attach_logging(
             streamed=False,
             token_drift_input=drift_input,
             token_drift_output=drift_output,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_creation,
+            cache_miss_estimate=cache_miss,
             **log_meta,
         )
         request_logger.emit(record)
@@ -369,6 +393,7 @@ def _attach_metrics(
     response: Response,
     *,
     profile_name: str,
+    profile_kind: str | None = None,
     start: float,
     est_input_tokens: int = 0,
     body_json: dict | None = None,
@@ -391,6 +416,7 @@ def _attach_metrics(
                 input_tokens = output_tokens = 0
                 cost_usd = 0.0
                 drift_input = drift_output = None
+                cache_read = cache_creation = cache_miss = None
 
                 upstream_sse = extract_upstream_usage_from_sse(buf)
                 if upstream_sse:
@@ -401,8 +427,15 @@ def _attach_metrics(
                     drift_input = est_input_tokens - input_tokens
                     drift_output = est_out - output_tokens
 
+                if profile_kind == "passthrough":
+                    cache_read, cache_creation = extract_anthropic_cache_usage_from_sse(buf)
+                elif profile_kind == "openai" and body_json is not None:
+                    from services.tokenizer import count_messages_tokens
+                    cache_miss = count_messages_tokens(body_json)
+
                 collector.record(
                     profile=profile_name,
+                    profile_kind=profile_kind,
                     status=response.status_code,
                     latency_ms=latency_ms,
                     input_tokens=input_tokens,
@@ -410,6 +443,9 @@ def _attach_metrics(
                     cost_usd=cost_usd,
                     token_drift_input=drift_input,
                     token_drift_output=drift_output,
+                    cache_read_input_tokens=cache_read,
+                    cache_creation_input_tokens=cache_creation,
+                    cache_miss_estimate=cache_miss,
                 )
 
         response.body_iterator = _wrapped()
@@ -418,6 +454,7 @@ def _attach_metrics(
         input_tokens = output_tokens = 0
         cost_usd = 0.0
         drift_input = drift_output = None
+        cache_read = cache_creation = cache_miss = None
         try:
             body = json.loads(response.body)
             upstream_usage = extract_usage_from_response(body)
@@ -436,10 +473,16 @@ def _attach_metrics(
                 input_tokens = int(usage.get("input_tokens") or 0)
                 output_tokens = int(usage.get("output_tokens") or 0)
                 cost_usd = input_tokens * _COST_PER_INPUT_TOKEN + output_tokens * _COST_PER_OUTPUT_TOKEN
+            if profile_kind == "passthrough":
+                cache_read, cache_creation = extract_anthropic_cache_usage_from_response(body)
         except Exception:
             pass
+        if profile_kind == "openai" and body_json is not None:
+            from services.tokenizer import count_messages_tokens
+            cache_miss = count_messages_tokens(body_json)
         collector.record(
             profile=profile_name,
+            profile_kind=profile_kind,
             status=response.status_code,
             latency_ms=latency_ms,
             input_tokens=input_tokens,
@@ -447,6 +490,9 @@ def _attach_metrics(
             cost_usd=cost_usd,
             token_drift_input=drift_input,
             token_drift_output=drift_output,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_creation,
+            cache_miss_estimate=cache_miss,
         )
     return response
 
@@ -520,6 +566,7 @@ async def messages_passthrough(request: Request) -> Response:
             metrics,
             response,
             profile_name=profile_name,
+            profile_kind=log_meta.get("profile_kind"),
             start=start,
             est_input_tokens=est_input_tokens,
             body_json=body_json,
