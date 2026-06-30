@@ -9,6 +9,7 @@ from profiles import ProfileRegistry, get_or_load_config
 from routers.messages import router as messages_router
 from routers.models import router as models_router
 from routers.passthrough import router as passthrough_router
+from services.request_logger import RequestLogger
 
 
 @asynccontextmanager
@@ -20,6 +21,8 @@ async def lifespan(app: FastAPI):
     app.state.proxy_config = proxy_config
     app.state.config_from_file = config_from_file
     app.state.profile_registry = ProfileRegistry(proxy_config)
+
+    app.state.request_logger = RequestLogger()
 
     client = httpx.AsyncClient(timeout=httpx.Timeout(settings.upstream_read_timeout))
     app.state.http_client = client
