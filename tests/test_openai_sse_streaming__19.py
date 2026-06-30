@@ -3,11 +3,8 @@ from __future__ import annotations
 
 import contextlib
 import json
-from typing import AsyncIterator
-from unittest.mock import AsyncMock, MagicMock
 
 import httpx
-import pytest
 from fastapi.testclient import TestClient
 
 from config import Settings
@@ -249,7 +246,6 @@ def test_content_block_delta_text_matches_upstream(monkeypatch):
 
 def test_ping_events_emitted_during_stream(monkeypatch):
     """AC4: periodic ping/comment lines appear in SSE output."""
-    import asyncio
 
     slow_chunks = _openai_sse_chunks(["hi"])
 
