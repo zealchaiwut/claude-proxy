@@ -1,11 +1,26 @@
 import os
+from contextlib import asynccontextmanager
 
+import httpx
 import uvicorn
 from fastapi import Depends, FastAPI
 
 from config import Settings, get_settings
+from routers.messages import router as messages_router
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    app.state.settings = settings
+    client = httpx.AsyncClient(timeout=httpx.Timeout(settings.upstream_read_timeout))
+    app.state.http_client = client
+    yield
+    await client.aclose()
+
+
+app = FastAPI(lifespan=lifespan)
+app.include_router(messages_router)
 
 
 @app.get("/health")
