@@ -12,6 +12,8 @@ from schemas.openai import ChatRequest, ChatResponse
 from services.openai_sse_consumer import (
     ContentEvent,
     FinishEvent,
+    ToolCallDeltaEvent,
+    ToolCallStartEvent,
     UsageEvent,
     consume_openai_sse_stream,
 )
@@ -278,11 +280,6 @@ async def live_stream_to_anthropic_sse(
             "usage": {"input_tokens": input_tokens},
         },
     })
-    yield _sse_frame("content_block_start", {
-        "type": "content_block_start",
-        "index": 0,
-        "content_block": {"type": "text", "text": ""},
-    })
 
     _DONE = object()
     event_iter = consume_openai_sse_stream(byte_stream).__aiter__()
@@ -292,6 +289,10 @@ async def live_stream_to_anthropic_sse(
             return await event_iter.__anext__()
         except StopAsyncIteration:
             return _DONE
+
+    # Track content blocks: next index to assign, and the index of the currently open block.
+    next_block_idx = 0
+    open_block_idx: int | None = None
 
     task: asyncio.Future = asyncio.ensure_future(_next())
     while True:
@@ -303,11 +304,45 @@ async def live_stream_to_anthropic_sse(
         if result is _DONE:
             break
         if isinstance(result, ContentEvent):
+            if open_block_idx is None:
+                yield _sse_frame("content_block_start", {
+                    "type": "content_block_start",
+                    "index": next_block_idx,
+                    "content_block": {"type": "text", "text": ""},
+                })
+                open_block_idx = next_block_idx
+                next_block_idx += 1
             yield _sse_frame("content_block_delta", {
                 "type": "content_block_delta",
-                "index": 0,
+                "index": open_block_idx,
                 "delta": {"type": "text_delta", "text": result.text},
             })
+        elif isinstance(result, ToolCallStartEvent):
+            if open_block_idx is not None:
+                yield _sse_frame("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": open_block_idx,
+                })
+                open_block_idx = None
+            yield _sse_frame("content_block_start", {
+                "type": "content_block_start",
+                "index": next_block_idx,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": result.id,
+                    "name": result.name,
+                    "input": {},
+                },
+            })
+            open_block_idx = next_block_idx
+            next_block_idx += 1
+        elif isinstance(result, ToolCallDeltaEvent):
+            if open_block_idx is not None:
+                yield _sse_frame("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": open_block_idx,
+                    "delta": {"type": "input_json_delta", "partial_json": result.partial_json},
+                })
         elif isinstance(result, FinishEvent):
             stop_reason = _FINISH_REASON_MAP.get(result.reason, "end_turn")
         elif isinstance(result, UsageEvent):
@@ -315,7 +350,9 @@ async def live_stream_to_anthropic_sse(
             output_tokens = result.usage.get("completion_tokens", 0) or 0
         task = asyncio.ensure_future(_next())
 
-    yield _sse_frame("content_block_stop", {"type": "content_block_stop", "index": 0})
+    if open_block_idx is not None:
+        yield _sse_frame("content_block_stop", {"type": "content_block_stop", "index": open_block_idx})
+
     yield _sse_frame("message_delta", {
         "type": "message_delta",
         "delta": {"stop_reason": stop_reason, "stop_sequence": None},
