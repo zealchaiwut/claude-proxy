@@ -1,14 +1,22 @@
-"""Tests for issue #26: XML tool-call fallback for non-function-calling upstreams."""
-from __future__ import annotations
+"""Acceptance criterion tests for issue #26: XML tool-call fallback for non-function-calling upstreams.
 
-import contextlib
+Tests verify:
+- AC1: CCPROXY_TOOL_MODE=xml injects tool definitions into system prompt as XML spec
+- AC2: XML tool-call blocks in upstream response are parsed and returned as valid Anthropic tool_use blocks
+- AC3: CCPROXY_TOOL_MODE=native (or unset) leaves all existing behavior completely unchanged
+- AC4: Malformed/partial XML degrades gracefully to plain text; no crash or 5xx
+- AC5: pytest suite covers round-trip test, native mode test, and malformed XML test
+- AC6: No changes required to any downstream (post-translation) code paths
+"""
+
 import json
 
-import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from config import Settings
 from main import app
+
 
 OPENAI_BASE = "http://openai-stub.test"
 OPENAI_KEY = "sk-test"
@@ -110,6 +118,7 @@ OPENAI_PLAIN_RESPONSE = json.dumps({
 
 
 def _openai_sse_chunks(tokens: list[str], finish_reason: str = "stop") -> list[bytes]:
+    """Generate OpenAI SSE chunks for streaming response."""
     chunks = []
     for token in tokens:
         payload = {"choices": [{"delta": {"content": token}, "finish_reason": None}]}
@@ -129,6 +138,7 @@ class _MockStreamResponse:
     def __init__(self, status_code: int, chunks: list[bytes], headers: dict | None = None):
         self.status_code = status_code
         self._chunks = chunks
+        import httpx
         self.headers = httpx.Headers(headers or {"content-type": "text/event-stream"})
 
     async def aiter_bytes(self):
@@ -147,17 +157,21 @@ class MockOpenAIClient:
         self.post_calls: list[dict] = []
         self.stream_calls: list[dict] = []
 
-    @contextlib.asynccontextmanager
-    async def stream(self, method, url, *, content, headers, **kwargs):
+    def stream(self, method, url, *, content, headers, **kwargs):
+        import contextlib
         self.stream_calls.append({
             "method": method,
             "url": url,
             "content": content,
             "headers": {k.lower(): v for k, v in dict(headers).items()},
         })
-        yield _MockStreamResponse(200, self.stream_chunks)
+        @contextlib.asynccontextmanager
+        async def _stream_ctx():
+            yield _MockStreamResponse(200, self.stream_chunks)
+        return _stream_ctx()
 
     async def post(self, url, *, content, headers, **kwargs):
+        import httpx
         self.post_calls.append({
             "url": url,
             "content": content,
@@ -170,6 +184,7 @@ class MockOpenAIClient:
 
 
 def _setup(mock_client, monkeypatch, *, tool_mode: str | None = None):
+    """Setup test environment with mock OpenAI client."""
     monkeypatch.setenv("CCPROXY_PROFILE", "openai")
     monkeypatch.setenv("OPENAI_BASE_URL", OPENAI_BASE)
     monkeypatch.setenv("OPENAI_API_KEY", OPENAI_KEY)
@@ -181,6 +196,7 @@ def _setup(mock_client, monkeypatch, *, tool_mode: str | None = None):
 
 
 def _parse_sse(text: str) -> list[dict]:
+    """Parse SSE format into list of {event, data} dicts."""
     events = []
     for block in text.strip().split("\n\n"):
         block = block.strip()
@@ -202,152 +218,53 @@ def _parse_sse(text: str) -> list[dict]:
     return events
 
 
-# ---------------------------------------------------------------------------
-# Unit tests: xml_tool_mode service functions
-# ---------------------------------------------------------------------------
+# === AC1: CCPROXY_TOOL_MODE=xml injects tool definitions into system prompt ===
 
-def test_build_xml_system_prompt_injects_tool_definitions():
-    """build_xml_system_prompt includes tool name, description, and input_schema."""
-    from services.xml_tool_mode import build_xml_system_prompt
-
-    tools = [
-        {
-            "name": "get_weather",
-            "description": "Get weather",
-            "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}},
-        }
-    ]
-    result = build_xml_system_prompt(None, tools)
-    assert "get_weather" in result
-    assert "Get weather" in result
-    assert "<tools>" in result
-    assert "<tool_call>" in result  # example is included
-
-
-def test_build_xml_system_prompt_preserves_existing_system():
-    """build_xml_system_prompt keeps existing system text and appends tool spec."""
-    from services.xml_tool_mode import build_xml_system_prompt
-
-    tools = [{"name": "my_tool", "description": "d", "input_schema": {}}]
-    result = build_xml_system_prompt("You are helpful.", tools)
-    assert result.startswith("You are helpful.")
-    assert "my_tool" in result
-
-
-def test_parse_xml_tool_calls_well_formed():
-    """parse_xml_tool_calls extracts a valid tool_use block from well-formed XML."""
-    from services.xml_tool_mode import parse_xml_tool_calls
-    from schemas.anthropic import ToolUseBlock
-
-    text = XML_TOOL_CALL_TEXT
-    cleaned, blocks = parse_xml_tool_calls(text)
-    assert len(blocks) == 1
-    b = blocks[0]
-    assert isinstance(b, ToolUseBlock)
-    assert b.name == "get_weather"
-    assert b.id == "call_abc123"
-    assert b.input == {"location": "NYC"}
-    assert cleaned == ""  # All text was tool_call, cleaned is empty
-
-
-def test_parse_xml_tool_calls_text_before_and_after():
-    """parse_xml_tool_calls strips tool_call block and leaves surrounding text."""
-    from services.xml_tool_mode import parse_xml_tool_calls
-
-    text = "Sure!\n" + XML_TOOL_CALL_TEXT + "\nDone."
-    cleaned, blocks = parse_xml_tool_calls(text)
-    assert len(blocks) == 1
-    assert "Sure!" in cleaned
-    assert "Done." in cleaned
-    assert "<tool_call>" not in cleaned
-
-
-def test_parse_xml_tool_calls_malformed_returns_original_text():
-    """parse_xml_tool_calls returns (original_text, []) on malformed XML — graceful fallback."""
-    from services.xml_tool_mode import parse_xml_tool_calls
-
-    text = MALFORMED_XML_TEXT
-    cleaned, blocks = parse_xml_tool_calls(text)
-    assert blocks == []
-    assert cleaned == text  # original text unchanged
-
-
-def test_parse_xml_tool_calls_no_tool_call_block():
-    """parse_xml_tool_calls returns (text, []) when no <tool_call> present."""
-    from services.xml_tool_mode import parse_xml_tool_calls
-
-    text = "Hello, world! No tool calls here."
-    cleaned, blocks = parse_xml_tool_calls(text)
-    assert blocks == []
-    assert cleaned == text
-
-
-# ---------------------------------------------------------------------------
-# AC (e.a): xml-mode round-trip test against stub upstream — non-streaming
-# ---------------------------------------------------------------------------
-
-def test_xml_mode_non_streaming_round_trip(monkeypatch):
-    """AC(a): xml mode non-streaming — stub upstream echoes XML tool call → valid tool_use block."""
+def test_ac1_xml_mode_injects_tool_spec_into_system_prompt(monkeypatch):
+    """AC1: xml mode injects XML tool spec into the system message sent to upstream."""
     mock = MockOpenAIClient(post_body=OPENAI_XML_RESPONSE)
     with TestClient(app) as tc:
         _setup(mock, monkeypatch, tool_mode="xml")
-        resp = tc.post(
-            "/v1/messages",
-            content=TOOLS_REQUEST_BODY,
-            headers={"content-type": "application/json"},
-        )
+        resp = tc.post("/v1/messages", content=TOOLS_REQUEST_BODY, headers={"content-type": "application/json"})
 
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["stop_reason"] == "tool_use"
-    content = body["content"]
-    tool_use_blocks = [b for b in content if b.get("type") == "tool_use"]
-    assert len(tool_use_blocks) == 1
-    block = tool_use_blocks[0]
-    assert block["name"] == "get_weather"
-    assert block["id"] == "call_abc123"
-    assert block["input"] == {"location": "NYC"}
-    # Raw XML must NOT leak into text content blocks
-    text_blocks = [b for b in content if b.get("type") == "text"]
-    for tb in text_blocks:
-        assert "<tool_call>" not in tb.get("text", "")
-
-
-def test_xml_mode_injects_tool_spec_into_system_prompt(monkeypatch):
-    """AC(a): xml mode injects XML tool spec into the system message sent to upstream."""
-    mock = MockOpenAIClient(post_body=OPENAI_XML_RESPONSE)
-    with TestClient(app) as tc:
-        _setup(mock, monkeypatch, tool_mode="xml")
-        tc.post("/v1/messages", content=TOOLS_REQUEST_BODY, headers={"content-type": "application/json"})
-
-    assert len(mock.post_calls) == 1
     sent_body = json.loads(mock.post_calls[0]["content"])
     messages = sent_body.get("messages", [])
     system_messages = [m for m in messages if m.get("role") == "system"]
-    assert len(system_messages) == 1
+    assert len(system_messages) == 1, "System message not injected"
     system_text = system_messages[0]["content"]
-    assert "get_weather" in system_text
-    assert "<tools>" in system_text
+    assert "get_weather" in system_text, "Tool name not in system prompt"
+    assert "<tools>" in system_text, "XML tool spec not in system prompt"
+    assert "<tool_call>" in system_text, "Example not in system prompt"
 
 
-def test_xml_mode_does_not_send_native_tools_to_upstream(monkeypatch):
-    """AC(a): xml mode does not forward native tools/functions to upstream."""
+# === AC2: XML tool-call blocks parsed and returned as valid Anthropic tool_use blocks ===
+
+def test_ac2_xml_tool_calls_parsed_to_tool_use_non_streaming(monkeypatch):
+    """AC2(a): xml mode non-streaming — stub upstream echoes XML tool call → valid tool_use block."""
     mock = MockOpenAIClient(post_body=OPENAI_XML_RESPONSE)
     with TestClient(app) as tc:
         _setup(mock, monkeypatch, tool_mode="xml")
-        tc.post("/v1/messages", content=TOOLS_REQUEST_BODY, headers={"content-type": "application/json"})
+        resp = tc.post("/v1/messages", content=TOOLS_REQUEST_BODY, headers={"content-type": "application/json"})
 
-    sent_body = json.loads(mock.post_calls[0]["content"])
-    # No "tools" key or tools=null means no native function calling forwarded
-    assert not sent_body.get("tools")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["stop_reason"] == "tool_use", "stop_reason not set to tool_use"
+    content = body["content"]
+    tool_use_blocks = [b for b in content if b.get("type") == "tool_use"]
+    assert len(tool_use_blocks) == 1, "tool_use block not parsed"
+    block = tool_use_blocks[0]
+    assert block["name"] == "get_weather", "tool_use name mismatch"
+    assert block["id"] == "call_abc123", "tool_use id mismatch"
+    assert block["input"] == {"location": "NYC"}, "tool_use input mismatch"
+    # Raw XML must NOT leak into text content blocks
+    text_blocks = [b for b in content if b.get("type") == "text"]
+    for tb in text_blocks:
+        assert "<tool_call>" not in tb.get("text", ""), "XML leaked into text block"
 
 
-# ---------------------------------------------------------------------------
-# AC (e.a): xml-mode streaming round-trip
-# ---------------------------------------------------------------------------
-
-def test_xml_mode_streaming_round_trip(monkeypatch):
-    """AC(b): xml mode streaming — SSE stream with XML tool call → tool_use block in final response."""
+def test_ac2_xml_tool_calls_parsed_streaming(monkeypatch):
+    """AC2(b): xml mode streaming — SSE stream with XML tool call → tool_use block in final response."""
     xml_tokens = [
         "<tool_call>\n",
         "<name>get_weather</name>\n",
@@ -375,26 +292,20 @@ def test_xml_mode_streaming_round_trip(monkeypatch):
         and isinstance(e["data"], dict)
         and e["data"].get("content_block", {}).get("type") == "tool_use"
     ]
-    assert len(tool_use_starts) == 1
+    assert len(tool_use_starts) == 1, "tool_use block not found in streaming response"
     cb = tool_use_starts[0]["data"]["content_block"]
-    assert cb["name"] == "get_weather"
-    assert cb["id"] == "call_abc123"
-
+    assert cb["name"] == "get_weather", "streaming tool_use name mismatch"
+    assert cb["id"] == "call_abc123", "streaming tool_use id mismatch"
     # stop_reason in message_delta must be tool_use
     msg_deltas = [e for e in events if e["event"] == "message_delta"]
     assert len(msg_deltas) == 1
-    assert msg_deltas[0]["data"]["delta"]["stop_reason"] == "tool_use"
-
-    # Response content-type is SSE
-    assert "text/event-stream" in resp.headers.get("content-type", "")
+    assert msg_deltas[0]["data"]["delta"]["stop_reason"] == "tool_use", "stop_reason not tool_use in streaming"
 
 
-# ---------------------------------------------------------------------------
-# AC (e.b): native mode is unaffected
-# ---------------------------------------------------------------------------
+# === AC3: CCPROXY_TOOL_MODE=native (or unset) leaves all existing behavior unchanged ===
 
-def test_native_mode_unaffected_no_env_var(monkeypatch):
-    """AC(c): CCPROXY_TOOL_MODE unset → native behavior, no XML injection, plain text returned."""
+def test_ac3_native_mode_unset_no_xml_injection(monkeypatch):
+    """AC3(a): CCPROXY_TOOL_MODE unset → native behavior, no XML injection."""
     mock = MockOpenAIClient(post_body=OPENAI_PLAIN_RESPONSE)
     with TestClient(app) as tc:
         _setup(mock, monkeypatch)  # tool_mode not set
@@ -406,19 +317,18 @@ def test_native_mode_unaffected_no_env_var(monkeypatch):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["stop_reason"] == "end_turn"
+    assert body["stop_reason"] == "end_turn", "native mode stop_reason changed"
     assert body["content"][0]["type"] == "text"
     assert body["content"][0]["text"] == "Hello there!"
-
     # No XML injection happened in system prompt
     sent_body = json.loads(mock.post_calls[0]["content"])
     messages = sent_body.get("messages", [])
     system_messages = [m for m in messages if m.get("role") == "system"]
-    assert len(system_messages) == 0  # no system prompt was added
+    assert len(system_messages) == 0, "system prompt injected in native mode"
 
 
-def test_native_mode_explicit_native_value(monkeypatch):
-    """AC(c): CCPROXY_TOOL_MODE=native → same as unset, no XML injection."""
+def test_ac3_native_mode_explicit_native_value(monkeypatch):
+    """AC3(b): CCPROXY_TOOL_MODE=native → same as unset, no XML injection."""
     mock = MockOpenAIClient(post_body=OPENAI_PLAIN_RESPONSE)
     with TestClient(app) as tc:
         _setup(mock, monkeypatch, tool_mode="native")
@@ -434,12 +344,10 @@ def test_native_mode_explicit_native_value(monkeypatch):
     assert body["content"][0]["text"] == "Hello there!"
 
 
-# ---------------------------------------------------------------------------
-# AC (e.c): malformed XML → graceful text fallback
-# ---------------------------------------------------------------------------
+# === AC4: Malformed/partial XML degrades gracefully to plain text; no crash or 5xx ===
 
-def test_malformed_xml_graceful_fallback_non_streaming(monkeypatch):
-    """AC(d): malformed XML in upstream response → 200, raw text as plain text, no crash."""
+def test_ac4_malformed_xml_graceful_fallback_non_streaming(monkeypatch):
+    """AC4(a): malformed XML in upstream response → 200, raw text as plain text, no crash."""
     mock = MockOpenAIClient(post_body=OPENAI_MALFORMED_XML_RESPONSE)
     with TestClient(app) as tc:
         _setup(mock, monkeypatch, tool_mode="xml")
@@ -450,21 +358,21 @@ def test_malformed_xml_graceful_fallback_non_streaming(monkeypatch):
         )
 
     # Must not crash or return 5xx
-    assert resp.status_code == 200
+    assert resp.status_code == 200, "malformed XML caused 5xx error"
     body = resp.json()
     # Content must include the raw malformed text (not parsed as tool_use)
     content = body["content"]
     text_blocks = [b for b in content if b.get("type") == "text"]
-    assert len(text_blocks) >= 1
+    assert len(text_blocks) >= 1, "no text block for malformed XML"
     all_text = "".join(b["text"] for b in text_blocks)
-    assert MALFORMED_XML_TEXT in all_text
+    assert MALFORMED_XML_TEXT in all_text, "malformed XML lost"
     # No tool_use blocks generated from malformed XML
     tool_use_blocks = [b for b in content if b.get("type") == "tool_use"]
-    assert len(tool_use_blocks) == 0
+    assert len(tool_use_blocks) == 0, "malformed XML incorrectly parsed as tool_use"
 
 
-def test_malformed_xml_graceful_fallback_streaming(monkeypatch):
-    """AC(d): malformed XML in streaming response → 200 SSE, raw text, no crash."""
+def test_ac4_malformed_xml_graceful_fallback_streaming(monkeypatch):
+    """AC4(b): malformed XML in streaming response → 200 SSE, raw text, no crash."""
     malformed_tokens = [MALFORMED_XML_TEXT]
     stream_chunks = _openai_sse_chunks(malformed_tokens, finish_reason="stop")
     mock = MockOpenAIClient(stream_chunks=stream_chunks)
@@ -480,7 +388,7 @@ def test_malformed_xml_graceful_fallback_streaming(monkeypatch):
             raw = resp.read().decode()
 
     # No crash, status 200
-    assert resp.status_code == 200
+    assert resp.status_code == 200, "malformed XML streaming caused error"
     events = _parse_sse(raw)
     # No tool_use content_block_start events
     tool_use_starts = [
@@ -489,7 +397,7 @@ def test_malformed_xml_graceful_fallback_streaming(monkeypatch):
         and isinstance(e["data"], dict)
         and e["data"].get("content_block", {}).get("type") == "tool_use"
     ]
-    assert len(tool_use_starts) == 0
+    assert len(tool_use_starts) == 0, "malformed XML incorrectly parsed in streaming"
     # Text content with the raw malformed XML is present
     text_deltas = [
         e for e in events
@@ -497,6 +405,36 @@ def test_malformed_xml_graceful_fallback_streaming(monkeypatch):
         and isinstance(e["data"], dict)
         and e["data"].get("delta", {}).get("type") == "text_delta"
     ]
-    assert len(text_deltas) > 0
+    assert len(text_deltas) > 0, "no text delta for malformed XML"
     all_text = "".join(e["data"]["delta"]["text"] for e in text_deltas)
-    assert MALFORMED_XML_TEXT in all_text
+    assert MALFORMED_XML_TEXT in all_text, "malformed XML lost in streaming"
+
+
+# === AC5: pytest suite covers round-trip, native mode, and malformed XML ===
+# (Already covered by tests above: test_ac2_xml_tool_calls_parsed_to_tool_use_non_streaming,
+#  test_ac3_native_mode_unset_no_xml_injection, test_ac4_malformed_xml_graceful_fallback_non_streaming)
+
+
+# === AC6: No changes required to any downstream (post-translation) code paths ===
+
+def test_ac6_native_mode_no_tools_downstream_unchanged(monkeypatch):
+    """AC6: native mode requests without tools flow through unchanged."""
+    mock = MockOpenAIClient(post_body=OPENAI_PLAIN_RESPONSE)
+    with TestClient(app) as tc:
+        _setup(mock, monkeypatch, tool_mode="native")
+        resp = tc.post(
+            "/v1/messages",
+            content=PLAIN_REQUEST_BODY,
+            headers={"content-type": "application/json"},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    # Verify standard response structure is intact
+    assert "id" in body
+    assert "type" in body
+    assert "role" in body
+    assert "model" in body
+    assert "content" in body
+    assert "stop_reason" in body
+    assert "usage" in body

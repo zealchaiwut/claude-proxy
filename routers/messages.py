@@ -137,7 +137,6 @@ async def _handle_openai_mode(request: Request, body_json: dict) -> Response:
     # XML mode: post-process — extract tool calls from text blocks
     if tool_mode == "xml":
         from services.xml_tool_mode import parse_xml_tool_calls
-        from schemas.anthropic import ToolUseBlock
         full_text = "".join(b.text for b in anthropic_resp.content if isinstance(b, TextBlock))
         cleaned, tool_blocks = parse_xml_tool_calls(full_text)
         if tool_blocks:
