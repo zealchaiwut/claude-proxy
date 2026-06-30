@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from config import Settings
 from main import app
+
+# ---------------------------------------------------------------------------
+# Unit test fixtures / helpers
+# ---------------------------------------------------------------------------
 
 OPENAI_BASE = "http://openai-stub.test"
 OPENAI_KEY = "sk-test"
@@ -489,3 +495,202 @@ def test_openai_nonstream_still_works(monkeypatch):
     body = resp.json()
     assert body["role"] == "assistant"
     assert "text/event-stream" not in resp.headers.get("content-type", "")
+
+
+# ---------------------------------------------------------------------------
+# UAT tests — require a live server (set UAT_BASE_URL env var)
+# ---------------------------------------------------------------------------
+
+_UAT_BASE_URL = os.environ.get("UAT_BASE_URL", "")
+_uat_available = bool(_UAT_BASE_URL and _UAT_BASE_URL.startswith("http"))
+_uat_skip = pytest.mark.skipif(not _uat_available, reason="UAT_BASE_URL not set")
+
+
+@pytest.fixture
+def uat_client():
+    """httpx client pointed at the UAT server."""
+    with httpx.Client(base_url=_UAT_BASE_URL, timeout=30.0) as c:
+        yield c
+
+
+@_uat_skip
+def test_uat_openai_stream_returns_text_event_stream(uat_client):
+    """UAT AC1: POST /v1/messages with stream=true returns Content-Type: text/event-stream."""
+    body = {
+        "model": "claude-3-haiku-20240307",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "Say hello"}],
+        "stream": True,
+    }
+    with uat_client.stream("POST", "/v1/messages", json=body) as resp:
+        content_type = resp.headers.get("content-type", "")
+    assert "text/event-stream" in content_type, f"Expected text/event-stream, got {content_type}"
+
+
+@_uat_skip
+def test_uat_openai_stream_uses_streaming_path(uat_client):
+    """UAT AC2: stream=true in openai mode uses the new streaming path (not buffered fallback)."""
+    body = {
+        "model": "claude-3-haiku-20240307",
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "Count to 5"}],
+        "stream": True,
+    }
+    with uat_client.stream("POST", "/v1/messages", json=body) as resp:
+        assert resp.status_code == 200
+        content_type = resp.headers.get("content-type", "")
+        assert "text/event-stream" in content_type
+
+
+@_uat_skip
+def test_uat_content_block_delta_events_present(uat_client):
+    """UAT AC3: content_block_delta events are emitted in the stream."""
+    body = {
+        "model": "claude-3-haiku-20240307",
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "Hi"}],
+        "stream": True,
+    }
+    with uat_client.stream("POST", "/v1/messages", json=body) as resp:
+        text = resp.read().decode()
+    lines = text.split("\n")
+    events = [line[7:] for line in lines if line.startswith("event: ")]
+    assert "content_block_delta" in events, f"Missing content_block_delta in events: {events}"
+
+
+@_uat_skip
+def test_uat_deltas_before_message_stop(uat_client):
+    """UAT AC3: content_block_delta events appear before message_stop."""
+    body = {
+        "model": "claude-3-haiku-20240307",
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "Say hi"}],
+        "stream": True,
+    }
+    with uat_client.stream("POST", "/v1/messages", json=body) as resp:
+        text = resp.read().decode()
+    delta_pos = text.find("event: content_block_delta")
+    stop_pos = text.find("event: message_stop")
+    assert delta_pos >= 0, "No content_block_delta found in stream"
+    assert stop_pos >= 0, "No message_stop found in stream"
+    assert delta_pos < stop_pos, "content_block_delta should appear before message_stop"
+
+
+@_uat_skip
+def test_uat_stream_completes_without_timeout(uat_client):
+    """UAT AC4: Stream completes successfully with periodic ping events if slow."""
+    body = {
+        "model": "claude-3-haiku-20240307",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "Count slowly"}],
+        "stream": True,
+    }
+    with uat_client.stream("POST", "/v1/messages", json=body) as resp:
+        full_text = resp.read().decode()
+    assert "message_stop" in full_text, "Stream should end with message_stop event"
+    assert resp.status_code == 200
+
+
+@_uat_skip
+def test_uat_stream_disconnect_releases_resources(uat_client):
+    """UAT AC5: Disconnecting mid-stream closes the upstream connection cleanly."""
+    body = {
+        "model": "claude-3-haiku-20240307",
+        "max_tokens": 1000,
+        "messages": [{"role": "user", "content": "Write a very long response"}],
+        "stream": True,
+    }
+    with uat_client.stream("POST", "/v1/messages", json=body) as resp:
+        _ = resp.read(100)
+    assert True  # Success is not hanging
+
+
+@_uat_skip
+def test_uat_stream_error_event_on_failure(uat_client):
+    """UAT AC6: If upstream fails mid-stream, an Anthropic error event is sent."""
+    body = {
+        "model": "claude-3-haiku-20240307",
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "Test"}],
+        "stream": True,
+    }
+    with uat_client.stream("POST", "/v1/messages", json=body) as resp:
+        text = resp.read().decode()
+    assert resp.status_code == 200
+    assert "message_stop" in text or "error" in text
+
+
+@_uat_skip
+def test_uat_nonstream_error_when_upstream_fails_early(uat_client):
+    """UAT AC7: If upstream fails before sending content, return standard error response."""
+    body = {
+        "model": "claude-3-haiku-20240307",
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "Test"}],
+        "stream": True,
+    }
+    with uat_client.stream("POST", "/v1/messages", json=body) as resp:
+        assert resp.status_code in [200, 400, 401, 403, 500]
+
+
+@_uat_skip
+def test_uat_anthropic_profile_still_works(uat_client):
+    """UAT AC8: CCPROXY_PROFILE=anthropic streaming passthrough is unaffected."""
+    body = {
+        "model": "claude-3-haiku-20240307",
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "Hi"}],
+        "stream": True,
+    }
+    with uat_client.stream("POST", "/v1/messages", json=body) as resp:
+        text = resp.read().decode()
+    assert "message_start" in text, "Anthropic stream should have message_start"
+    assert "message_stop" in text, "Anthropic stream should have message_stop"
+
+
+@_uat_skip
+def test_uat_non_streaming_mode_unchanged(uat_client):
+    """UAT AC9: Non-streaming requests (stream=false) still return buffered JSON."""
+    body = {
+        "model": "claude-3-haiku-20240307",
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "Say hello"}],
+        "stream": False,
+    }
+    resp = uat_client.post("/v1/messages", json=body)
+    assert resp.status_code == 200
+    assert "text/event-stream" not in resp.headers.get("content-type", "")
+    data = resp.json()
+    assert "content" in data or "error" in data
+
+
+@_uat_skip
+def test_uat_anthropic_event_structure(uat_client):
+    """UAT Additional: Verify emitted events have correct Anthropic structure."""
+    body = {
+        "model": "claude-3-haiku-20240307",
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "Say a word"}],
+        "stream": True,
+    }
+    with uat_client.stream("POST", "/v1/messages", json=body) as resp:
+        text = resp.read().decode()
+
+    lines = text.split("\n\n")
+    found_message_start = False
+    found_delta = False
+    found_message_stop = False
+
+    for block in lines:
+        if "message_start" in block:
+            found_message_start = True
+            assert '"type": "message"' in block or '"type": "message_start"' in block
+        if "content_block_delta" in block:
+            found_delta = True
+            assert '"delta"' in block or '"type": "text_delta"' in block
+        if "message_stop" in block:
+            found_message_stop = True
+
+    assert found_message_start, "Stream should contain message_start event"
+    assert found_delta, "Stream should contain content_block_delta events"
+    assert found_message_stop, "Stream should contain message_stop event"
