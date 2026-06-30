@@ -3,6 +3,12 @@
 Per-sprint changelog for claude-proxy. Entries are written by the documentor when a
 sprint finishes. Dated per-sprint files live under [docs/changelog/](docs/changelog/).
 
+## Sprint 6
+
+- #40: Add structured per-request JSONL logging layer
+- #42: Add inbound correlation headers to proxy request records
+- #43: Add GET /metrics rolling summary endpoint
+
 ## Sprint 5
 
 - #35: Introduce profiles config system via config.toml
