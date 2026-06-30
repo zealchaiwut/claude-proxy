@@ -1,5 +1,4 @@
 """Tests for issue #9: Anthropic → OpenAI request translation (services/translator.py)."""
-import pytest
 
 from schemas.anthropic import MessagesRequest, TextBlock
 from schemas.openai import ChatRequest
