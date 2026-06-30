@@ -129,6 +129,73 @@ When two subprocesses run concurrently with different `CCPROXY_PROFILE` values, 
 
 When the resolved profile includes a `model_map`, the client's requested model name is rewritten to the upstream model string before the request is forwarded. This lets Claude Code send its native model names (e.g. `claude-haiku-4-5-20251001`) while the proxy transparently maps them to whatever the target backend expects.
 
+## Correlation Headers
+
+Three optional request headers let callers tag each request with Commander dispatch metadata. The proxy reads them, stores their values on the request record, and ignores them for routing or profile selection.
+
+| Header | Record field | Purpose |
+|--------|-------------|---------|
+| `X-CCProxy-Run` | `run_id` | Identifies the Commander run (e.g. sprint ID or UUID) that spawned this subprocess |
+| `X-CCProxy-Role` | `role` | The agent role (e.g. `coder`, `tester`, `estimator`) assigned to this subprocess |
+| `X-CCProxy-Ticket` | `ticket` | The issue or ticket reference being worked (e.g. `PROJ-42`) |
+
+When a header is present its value is stored as a string. When a header is absent the field is `null`. No combination of header values affects profile selection or upstream routing.
+
+### Injecting headers in Commander
+
+Pass the headers via `subprocess.Popen` using the `env` parameter or an explicit header dict in the launcher. Environment-variable forwarding is the simplest approach because `claude` (the CLI) sets `ANTHROPIC_BASE_URL` but does not automatically forward custom headers — the launcher must inject them explicitly:
+
+```python
+# In Commander's agent launcher (e.g. services/dispatcher.py)
+import subprocess, os
+
+env = {**os.environ, "ANTHROPIC_BASE_URL": "http://localhost:8788"}
+
+proc = subprocess.Popen(
+    ["claude", "--profile", "coder", ...],
+    env=env,
+    # Commander wraps the claude CLI with a thin HTTP shim that injects headers:
+    # X-CCProxy-Run: <run_id>
+    # X-CCProxy-Role: coder
+    # X-CCProxy-Ticket: PROJ-42
+)
+```
+
+Alternatively, if your launcher speaks HTTP directly (e.g. via `httpx`):
+
+```python
+headers = {
+    "X-CCProxy-Run": run_id,
+    "X-CCProxy-Role": "coder",
+    "X-CCProxy-Ticket": "PROJ-42",
+}
+response = client.post("http://localhost:8788/v1/messages", headers=headers, json=body)
+```
+
+### Sample log record
+
+A request tagged with all three headers produces a JSONL record like:
+
+```json
+{
+  "request_id": "a1b2c3d4-...",
+  "timestamp": "2026-06-30T10:00:00.000000+00:00",
+  "profile_name": "anthropic",
+  "profile_kind": "passthrough",
+  "requested_model": "claude-sonnet-4-6",
+  "upstream_model": "claude-sonnet-4-6",
+  "upstream_host": "api.anthropic.com",
+  "method": "POST",
+  "path": "/v1/messages",
+  "status": 200,
+  "latency_ms": 312.4,
+  "streamed": false,
+  "run_id": "run-42",
+  "role": "coder",
+  "ticket": "PROJ-42"
+}
+```
+
 ## Running Tests
 
 ```bash

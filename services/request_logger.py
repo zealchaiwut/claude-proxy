@@ -29,6 +29,9 @@ _REQUIRED_FIELDS = frozenset({
     "status",
     "latency_ms",
     "streamed",
+    "run_id",
+    "role",
+    "ticket",
 })
 
 
@@ -68,6 +71,9 @@ class RequestLogger:
         status: int,
         latency_ms: float,
         streamed: bool,
+        run_id: str | None = None,
+        role: str | None = None,
+        ticket: str | None = None,
     ) -> dict:
         return {
             "request_id": str(uuid.uuid4()),
@@ -82,6 +88,9 @@ class RequestLogger:
             "status": status,
             "latency_ms": latency_ms,
             "streamed": streamed,
+            "run_id": run_id,
+            "role": role,
+            "ticket": ticket,
         }
 
     def emit(self, record: dict) -> None:
