@@ -1,11 +1,13 @@
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import uvicorn
 from fastapi import Depends, FastAPI
 
 from config import Settings, get_settings
+from profiles import ProfileRegistry, get_or_load_config
 from routers.messages import router as messages_router
 from routers.models import router as models_router
 from routers.passthrough import router as passthrough_router
@@ -15,6 +17,11 @@ from routers.passthrough import router as passthrough_router
 async def lifespan(app: FastAPI):
     settings = get_settings()
     app.state.settings = settings
+
+    proxy_config, _ = get_or_load_config()
+    app.state.proxy_config = proxy_config
+    app.state.profile_registry = ProfileRegistry(proxy_config)
+
     client = httpx.AsyncClient(timeout=httpx.Timeout(settings.upstream_read_timeout))
     app.state.http_client = client
     yield
@@ -33,6 +40,7 @@ def health(settings: Settings = Depends(get_settings)):
 
 
 if __name__ == "__main__":
-    host = os.getenv("CCPROXY_HOST", "127.0.0.1")
-    port = int(os.getenv("CCPROXY_PORT", "8788"))
+    proxy_config, _ = get_or_load_config()
+    host = proxy_config.server.host
+    port = proxy_config.server.port
     uvicorn.run("main:app", host=host, port=port)
