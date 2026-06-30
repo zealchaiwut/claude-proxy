@@ -3,6 +3,13 @@
 Per-sprint changelog for claude-proxy. Entries are written by the documentor when a
 sprint finishes. Dated per-sprint files live under [docs/changelog/](docs/changelog/).
 
+## Sprint 7
+
+- #48: Make claude-proxy installable with console entrypoints
+- #49: Add systemd and launchd service units for claude-proxy
+- #50: Add /health and /ready lifecycle endpoints for Commander gating
+- #51: Write Commander onboarding runbook at docs/workflow.md
+
 ## Sprint 6
 
 - #40: Add structured per-request JSONL logging layer
