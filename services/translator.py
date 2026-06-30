@@ -40,6 +40,31 @@ def _extract_text(content: Any) -> str:
     return ""
 
 
+def _map_tools(anthropic_tools: list) -> list[dict]:
+    result = []
+    for tool in anthropic_tools:
+        if isinstance(tool, dict):
+            name = tool.get("name", "")
+            description = tool.get("description", "")
+            parameters = tool.get("input_schema", {})
+        else:
+            name = getattr(tool, "name", "")
+            description = getattr(tool, "description", "")
+            parameters = getattr(tool, "input_schema", {})
+        result.append({"type": "function", "function": {"name": name, "description": description, "parameters": parameters}})
+    return result
+
+
+def _map_tool_choice(anthropic_choice: Any) -> Any:
+    if anthropic_choice == "auto":
+        return "auto"
+    if anthropic_choice == "any":
+        return "required"
+    if isinstance(anthropic_choice, dict) and anthropic_choice.get("type") == "tool":
+        return {"type": "function", "function": {"name": anthropic_choice["name"]}}
+    return anthropic_choice
+
+
 def to_openai_request(anthropic_req: MessagesRequest, model: str) -> ChatRequest:
     messages: list[dict[str, str]] = []
 
@@ -61,10 +86,15 @@ def to_openai_request(anthropic_req: MessagesRequest, model: str) -> ChatRequest
             content = _extract_text(getattr(turn, "content", ""))
         messages.append({"role": role, "content": content})
 
+    oai_tools = _map_tools(anthropic_req.tools) if anthropic_req.tools else None
+    oai_tool_choice = _map_tool_choice(anthropic_req.tool_choice) if anthropic_req.tool_choice is not None else None
+
     return ChatRequest(
         model=model,
         messages=messages,
         max_tokens=anthropic_req.max_tokens,
+        tools=oai_tools,
+        tool_choice=oai_tool_choice,
     )
 
 
