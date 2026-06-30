@@ -14,7 +14,7 @@ uv tool install .
 pipx install .
 ```
 
-After install, both `claude-proxy` and `ccswitch` are on your `$PATH`.
+After install, `claude-proxy`, `ccswitch`, and `ccproxy` are on your `$PATH`.
 
 ## Quick Start
 
@@ -105,6 +105,7 @@ Streaming (`stream: true`) is fully supported — OpenAI SSE chunks are translat
 | `OPENAI_MODEL` | `gpt-4o` | Model name sent upstream (OpenAI mode) |
 | `CCPROXY_TOOL_MODE` | `native` | Tool call mode in OpenAI mode: `native` (function calling) or `xml` (XML prompt injection) |
 | `CCPROXY_LOG_FILE` | `~/.local/state/claude-proxy/requests.jsonl` | Path for the per-request JSONL log file; parent directories are created automatically |
+| `CCPROXY_CAPTURE` | _(off)_ | Set to `1`, `true`, or `yes` to enable capture for all requests globally |
 | `METRICS_WINDOW_SECONDS` | _(all-time)_ | If set, `GET /metrics` only includes samples from the last N seconds |
 
 ## Proxied Endpoints
@@ -369,6 +370,69 @@ CCPROXY_PROFILE=anthropic
 ```
 
 This file is never committed to version control — it lives only on the host.
+
+## Request Capture
+
+The proxy can write a JSON capture file for each proxied `POST /v1/messages` exchange. Captures include the full request body, assembled response, timing, and usage — with credentials automatically redacted.
+
+**Enable globally** (all profiles):
+
+```bash
+CCPROXY_CAPTURE=1 claude-proxy
+```
+
+**Enable per profile** in `config.toml`:
+
+```toml
+[profiles.anthropic]
+kind = "passthrough"
+upstream = "https://api.anthropic.com"
+capture = true
+```
+
+Capture files are written to `~/.local/state/claude-proxy/captures/<request_id>.json`. The directory is created automatically.
+
+Each capture file contains:
+
+```json
+{
+  "request_id": "a1b2c3d4-...",
+  "profile": { "name": "anthropic", "settings": { ... } },
+  "request": { "model": "claude-sonnet-4-6", "messages": [ ... ] },
+  "response": { "id": "msg_...", "content": [ ... ], "usage": { ... } },
+  "timing": { "start": "2026-07-01T10:00:00Z", "duration_ms": 312.4 },
+  "usage": { "input_tokens": 42, "output_tokens": 17 }
+}
+```
+
+Streaming responses are reassembled into a single response object before writing.
+
+## `ccproxy` CLI
+
+The `ccproxy` command-line tool provides proxy utilities. After install it is available on `$PATH`.
+
+### Replay a captured request
+
+```bash
+ccproxy replay <capture-file> --profile <name> [--stream | --no-stream]
+```
+
+Reads a capture file written by the capture feature and re-sends the original request through the named profile in your `config.toml`. Useful for debugging, regression testing, or comparing responses across profiles.
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `<capture-file>` | Path to the `.json` capture file |
+| `--profile <name>` | Profile to replay through (required) |
+| `--stream` | Force streaming mode regardless of original request |
+| `--no-stream` | Force non-streaming mode regardless of original request |
+
+**Example:**
+
+```bash
+ccproxy replay ~/.local/state/claude-proxy/captures/a1b2c3d4.json --profile anthropic
+```
 
 ## Running Tests
 
