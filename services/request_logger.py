@@ -63,6 +63,7 @@ class RequestLogger:
     def make_record(
         self,
         *,
+        request_id: str | None = None,
         profile_name: str,
         profile_kind: str,
         requested_model: str,
@@ -83,7 +84,7 @@ class RequestLogger:
         cache_miss_estimate: int | None = None,
     ) -> dict:
         return {
-            "request_id": str(uuid.uuid4()),
+            "request_id": request_id if request_id is not None else str(uuid.uuid4()),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "profile_name": profile_name,
             "profile_kind": profile_kind,

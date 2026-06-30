@@ -27,6 +27,7 @@ class ProfileConfig:
     # Per-profile override of extended-thinking handling on the OpenAI path.
     # None means "use the global default" (config.Settings.openai_thinking_mode).
     openai_thinking_mode: str | None = None
+    capture: bool = False  # write capture file for each request through this profile
 
 
 @dataclass
@@ -84,6 +85,13 @@ class ProfileRegistry:
             return None
         return profile.openai_thinking_mode
 
+    def get_capture(self, name: str) -> bool:
+        """Return the per-profile capture flag (False when profile not found)."""
+        profile = self._config.profiles.get(name)
+        if profile is None:
+            return False
+        return profile.capture
+
 
 def load_config(path: Path) -> ProxyConfig:
     """Parse a config.toml file into a ProxyConfig."""
@@ -118,6 +126,7 @@ def load_config(path: Path) -> ProxyConfig:
             prompt_cache=p.get("prompt_cache", "none"),
             cache_provider_hint=p.get("cache_provider_hint"),
             openai_thinking_mode=p.get("openai_thinking_mode"),
+            capture=bool(p.get("capture", False)),
         )
 
     return ProxyConfig(server=server, profiles=profiles)
