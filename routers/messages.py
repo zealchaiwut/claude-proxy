@@ -109,15 +109,24 @@ async def messages_passthrough(request: Request) -> Response:
         registry: ProfileRegistry | None = getattr(request.app.state, "profile_registry", None)
         if registry is not None:
             try:
-                kind, upstream_url, api_key, model, _ = registry.resolve(profile_name)
+                kind, upstream_url, api_key, model, model_map = registry.resolve(profile_name)
+                client_model = body_json.get("model", "")
                 if kind == "openai":
+                    upstream_model = (
+                        model_map.get(client_model)
+                        or model
+                        or os.getenv("OPENAI_MODEL", "gpt-4o")
+                    )
                     return await _handle_openai_mode(
                         request,
                         body_json,
                         openai_base_url=upstream_url,
                         openai_api_key=api_key,
-                        openai_model=model or os.getenv("OPENAI_MODEL", "gpt-4o"),
+                        openai_model=upstream_model,
                     )
+                if model_map and client_model in model_map:
+                    body_json = {**body_json, "model": model_map[client_model]}
+                    body_bytes = json.dumps(body_json).encode()
                 return await _passthrough(request, body_bytes, body_json, headers, upstream_url)
             except KeyError:
                 pass  # profile not in registry; fall through to legacy
