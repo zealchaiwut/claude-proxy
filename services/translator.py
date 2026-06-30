@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from typing import Any, AsyncIterator
 
-from schemas.anthropic import MessagesRequest, MessagesResponse, TextBlock
+from schemas.anthropic import MessagesRequest, MessagesResponse, TextBlock, ToolUseBlock
 from schemas.anthropic import Usage as AnthropicUsage
+
+_log = logging.getLogger(__name__)
 from schemas.openai import ChatRequest, ChatResponse
 from services.openai_sse_consumer import (
     ContentEvent,
@@ -250,12 +253,35 @@ def from_openai_response(openai_resp: ChatResponse) -> MessagesResponse:
     resp_id = getattr(openai_resp, "id", None) or "msg_translated"
     model = getattr(openai_resp, "model", None) or "unknown"
 
+    tool_calls = getattr(choice.message, "tool_calls", None)
+    if tool_calls:
+        stop_reason = "tool_use"
+        content: list[Any] = []
+        if text:
+            content.append(TextBlock(type="text", text=text))
+        for tc in tool_calls:
+            tc_id = tc.get("id", "")
+            fn = tc.get("function", {})
+            name = fn.get("name", "")
+            arguments_str = fn.get("arguments", "{}")
+            try:
+                input_data = json.loads(arguments_str)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                _log.warning(
+                    "tool_call %r has malformed arguments JSON; defaulting input to {}",
+                    tc_id,
+                )
+                input_data = {}
+            content.append(ToolUseBlock(type="tool_use", id=tc_id, name=name, input=input_data))
+    else:
+        content = [TextBlock(type="text", text=text)]
+
     return MessagesResponse(
         id=resp_id,
         type="message",
         role="assistant",
         model=model,
-        content=[TextBlock(type="text", text=text)],
+        content=content,
         stop_reason=stop_reason,
         usage=usage,
     )
