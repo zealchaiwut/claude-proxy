@@ -18,6 +18,7 @@ dependencies = [
 [project.scripts]
 claude-proxy = "main:main"
 ccswitch = "ccswitch:main"
+ccproxy = "ccproxy:main"
 
 [project.optional-dependencies]
 dev = [
@@ -34,6 +35,7 @@ only-include = [
   "config.py",
   "profiles.py",
   "ccswitch.py",
+  "ccproxy.py",
   "routers",
   "services",
   "schemas",
