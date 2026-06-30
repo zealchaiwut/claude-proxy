@@ -17,8 +17,6 @@ import re
 import tomllib
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).parent.parent
 
 # Grep pattern from UAT step 6 (extended for common secret formats)
