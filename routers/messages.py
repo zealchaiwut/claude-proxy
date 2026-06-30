@@ -2,6 +2,8 @@ import json
 import logging
 import os
 import time
+import uuid
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import httpx
@@ -9,6 +11,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
 
 from profiles import ProfileRegistry, resolve_profile_name
+from services.capture import CaptureService, reassemble_anthropic_sse
 from routers._proxy_utils import filter_headers, proxy_request
 from schemas.anthropic import MessagesRequest, TextBlock
 from schemas.openai import ChatResponse
@@ -279,6 +282,7 @@ def _attach_logging(
     request_logger: RequestLogger,
     response: Response,
     *,
+    request_id: str,
     profile_name: str,
     requested_model: str,
     method: str,
@@ -296,6 +300,7 @@ def _attach_logging(
     if isinstance(response, StreamingResponse):
         original = response.body_iterator
         _start = start
+        _request_id = request_id
 
         async def _wrapped():
             buf = b""
@@ -328,6 +333,7 @@ def _attach_logging(
                     cache_miss = count_messages_tokens(body_json)
 
                 record = request_logger.make_record(
+                    request_id=_request_id,
                     profile_name=profile_name,
                     requested_model=requested_model,
                     method=method,
@@ -377,6 +383,7 @@ def _attach_logging(
 
         latency_ms = (time.monotonic() - start) * 1000
         record = request_logger.make_record(
+            request_id=request_id,
             profile_name=profile_name,
             requested_model=requested_model,
             method=method,
@@ -506,9 +513,102 @@ def _attach_metrics(
     return response
 
 
+def _get_profile_capture(request: Request, profile_name: str) -> bool:
+    """Return the per-profile capture flag from the registry."""
+    config_from_file = getattr(request.app.state, "config_from_file", False)
+    if not config_from_file:
+        return False
+    registry: ProfileRegistry | None = getattr(request.app.state, "profile_registry", None)
+    if registry is None:
+        return False
+    return registry.get_capture(profile_name)
+
+
+def _get_profile_settings_for_capture(request: Request, profile_name: str) -> dict:
+    """Return a sanitised dict of profile settings for the capture file."""
+    config_from_file = getattr(request.app.state, "config_from_file", False)
+    if not config_from_file:
+        settings = getattr(request.app.state, "settings", None)
+        upstream = settings.upstream_base_url if settings else ""
+        return {"kind": "passthrough", "upstream": upstream}
+    registry: ProfileRegistry | None = getattr(request.app.state, "profile_registry", None)
+    if registry is None:
+        return {}
+    profile = registry._config.profiles.get(profile_name)
+    if profile is None:
+        return {}
+    return {
+        "kind": profile.kind,
+        "upstream": profile.upstream,
+        "model": profile.model,
+        "model_map": profile.model_map,
+        "prompt_cache": profile.prompt_cache,
+    }
+
+
+def _attach_capture(
+    capture_svc: CaptureService,
+    response: Response,
+    *,
+    request_id: str,
+    inbound_body: dict,
+    profile_name: str,
+    profile_settings: dict,
+    start_ts: str,
+    start: float,
+) -> Response:
+    """Write a capture file for this request; wraps StreamingResponse to accumulate SSE."""
+    if not isinstance(response, StreamingResponse):
+        try:
+            raw = response.body if hasattr(response, "body") else response.content
+            resp_body = json.loads(raw)
+        except Exception:
+            resp_body = {}
+        duration_ms = (time.monotonic() - start) * 1000
+        capture_svc.write(
+            request_id=request_id,
+            inbound_body=inbound_body,
+            profile_name=profile_name,
+            profile_settings=profile_settings,
+            response_body=resp_body,
+            start_ts=start_ts,
+            duration_ms=duration_ms,
+        )
+        return response
+
+    original = response.body_iterator
+    _start = start
+
+    async def _capture_wrapped():
+        buf = b""
+        try:
+            async for chunk in original:
+                if isinstance(chunk, str):
+                    chunk = chunk.encode()
+                buf += chunk
+                yield chunk
+        finally:
+            duration_ms = (time.monotonic() - _start) * 1000
+            assembled = reassemble_anthropic_sse(buf)
+            capture_svc.write(
+                request_id=request_id,
+                inbound_body=inbound_body,
+                profile_name=profile_name,
+                profile_settings=profile_settings,
+                response_body=assembled,
+                start_ts=start_ts,
+                duration_ms=duration_ms,
+            )
+
+    response.body_iterator = _capture_wrapped()
+    return response
+
+
 @router.post("/v1/messages")
 async def messages_passthrough(request: Request) -> Response:
     start = time.monotonic()
+    start_ts = datetime.now(timezone.utc).isoformat()
+    request_id = str(uuid.uuid4())
     body_bytes = await request.body()
     headers = _filter_headers(request.headers)
 
@@ -539,6 +639,7 @@ async def messages_passthrough(request: Request) -> Response:
         response = _attach_logging(
             request_logger,
             response,
+            request_id=request_id,
             profile_name=profile_name,
             requested_model=requested_model,
             method=request.method,
@@ -579,6 +680,19 @@ async def messages_passthrough(request: Request) -> Response:
             start=start,
             est_input_tokens=est_input_tokens,
             body_json=body_json,
+        )
+
+    capture_svc: CaptureService | None = getattr(request.app.state, "capture_service", None)
+    if capture_svc is not None and capture_svc.should_capture(_get_profile_capture(request, profile_name)):
+        response = _attach_capture(
+            capture_svc,
+            response,
+            request_id=request_id,
+            inbound_body=body_json,
+            profile_name=profile_name,
+            profile_settings=_get_profile_settings_for_capture(request, profile_name),
+            start_ts=start_ts,
+            start=start,
         )
 
     return response
