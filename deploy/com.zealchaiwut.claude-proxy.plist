@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  claude-proxy launchd template for macOS.
+  Install with: python scripts/install_service.py
+
+  Secrets are loaded from: ~/.config/claude-proxy/env
+  No credentials are stored in this file.
+
+  {{INSTALL_DIR}} and {{WRAPPER_SCRIPT}} are replaced by install_service.py.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zealchaiwut.claude-proxy</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{WRAPPER_SCRIPT}}</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>8788</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{INSTALL_DIR}}</string>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/claude-proxy.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/claude-proxy.err</string>
+</dict>
+</plist>
