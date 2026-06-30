@@ -24,7 +24,8 @@ def test_uat_step_1_request_with_pricing_logs_computed_cost():
 def test_uat_step_2_request_without_pricing_logs_null_cost():
     """UAT Step 2: Configure profile without pricing; verify est_cost_usd is null."""
     pytest.skip(
-        "manual — null cost verified via pytest unit tests (test_compute_est_cost_no_pricing_returns_none). "
+        "manual — null cost verified via unit tests "
+        "(test_compute_est_cost_no_pricing_returns_none). "
         "Requires server log inspection."
     )
 

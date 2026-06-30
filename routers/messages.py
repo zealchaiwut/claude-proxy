@@ -600,9 +600,11 @@ async def _handle_openai_stream(
                 yield frame.encode() if isinstance(frame, str) else frame
         except Exception as exc:
             if content_sent:
-                err_frame = (
-                    f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'stream_error', 'message': str(exc)}})}\n\n"
-                )
+                _err = json.dumps({
+                    'type': 'error',
+                    'error': {'type': 'stream_error', 'message': str(exc)},
+                })
+                err_frame = f"event: error\ndata: {_err}\n\n"
                 yield err_frame.encode()
         finally:
             await stream_ctx.__aexit__(None, None, None)

@@ -276,13 +276,41 @@ def test_non_streaming_fallback_when_no_upstream_usage(caplog):
 
 def _make_anthropic_sse_stream():
     """Build a realistic Anthropic SSE response as a list of byte chunks."""
+    msg_start = json.dumps({
+        "type": "message_start",
+        "message": {
+            "id": "msg_s1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3-haiku-20240307",
+            "content": [],
+            "usage": {"input_tokens": 15},
+        },
+    })
+    cb_start = json.dumps({
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "text", "text": ""},
+    })
+    cb_delta = json.dumps({
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "text_delta", "text": "Hello there!"},
+    })
+    cb_stop = json.dumps({"type": "content_block_stop", "index": 0})
+    msg_delta = json.dumps({
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+        "usage": {"output_tokens": 3},
+    })
+    msg_stop = json.dumps({"type": "message_stop"})
     frames = [
-        f'event: message_start\ndata: {json.dumps({"type":"message_start","message":{"id":"msg_s1","type":"message","role":"assistant","model":"claude-3-haiku-20240307","content":[],"usage":{"input_tokens":15}}})}\n\n',
-        f'event: content_block_start\ndata: {json.dumps({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})}\n\n',
-        f'event: content_block_delta\ndata: {json.dumps({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello there!"}})}\n\n',
-        f'event: content_block_stop\ndata: {json.dumps({"type":"content_block_stop","index":0})}\n\n',
-        f'event: message_delta\ndata: {json.dumps({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":None},"usage":{"output_tokens":3}})}\n\n',
-        f'event: message_stop\ndata: {json.dumps({"type":"message_stop"})}\n\n',
+        f"event: message_start\ndata: {msg_start}\n\n",
+        f"event: content_block_start\ndata: {cb_start}\n\n",
+        f"event: content_block_delta\ndata: {cb_delta}\n\n",
+        f"event: content_block_stop\ndata: {cb_stop}\n\n",
+        f"event: message_delta\ndata: {msg_delta}\n\n",
+        f"event: message_stop\ndata: {msg_stop}\n\n",
     ]
     return [f.encode() for f in frames]
 
