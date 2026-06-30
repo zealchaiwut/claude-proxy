@@ -664,7 +664,7 @@ async def count_tokens_passthrough(request: Request) -> Response:
     if profile_name == "openai":
         from services.tokenizer import get_tokenizer as _get_tok
 
-        tokenizer = _get_tok("heuristic")
+        tokenizer = _get_tok("openai")
         model = body_json.get("model", "gpt-4o")
         messages = body_json.get("messages", [])
         token_count = tokenizer.count_tokens(messages, model)

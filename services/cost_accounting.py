@@ -53,9 +53,10 @@ def count_input_tokens(body_json: dict[str, Any]) -> int:
 
 
 def count_output_tokens(text: str) -> int:
-    """Estimate output token count from response text (word count heuristic)."""
-    words = text.split()
-    return max(1, len(words)) if words else 1
+    """Count output tokens using the real tokenizer (issue #54)."""
+    from services.tokenizer import count_text_tokens
+    count = count_text_tokens(text)
+    return count if count > 0 else 1
 
 
 def parse_anthropic_sse_usage(
