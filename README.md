@@ -2,10 +2,57 @@
 
 A lightweight HTTP proxy for the Anthropic API, designed for use with Claude Code and other Anthropic API clients.
 
+## Install
+
+Install globally as a command-line tool using `uv` or `pipx`:
+
+```bash
+# with uv (recommended)
+uv tool install .
+
+# with pipx
+pipx install .
+```
+
+After install, both `claude-proxy` and `ccswitch` are on your `$PATH`.
+
 ## Quick Start
 
 ```bash
-pip install -e .
+# 1. Copy the example config
+cp config.example.toml config.toml
+
+# 2. Set your API key
+export ANTHROPIC_API_KEY=<your-key>
+
+# 3. Start the proxy
+claude-proxy
+```
+
+The server binds to the `host` and `port` defined in `config.toml` (`127.0.0.1:8788` by default).
+
+### First-run verification
+
+```bash
+curl http://127.0.0.1:8788/health
+# {"status":"ok","upstream":"https://api.anthropic.com"}
+```
+
+### Environment variables
+
+All variables are optional — `config.toml` takes precedence for `[server]` settings.
+Copy `.env.example` to `.env` for a template:
+
+```bash
+cp .env.example .env
+```
+
+See the **Configuration** table below for the full list of recognised variables.
+
+### Development install
+
+```bash
+pip install -e ".[dev]"
 uvicorn main:app --host 127.0.0.1 --port 8788
 ```
 
