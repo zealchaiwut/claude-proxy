@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import FastAPI
 
 from config import get_settings
@@ -44,7 +45,13 @@ app.include_router(passthrough_router)
 
 
 def main() -> None:
-    """Console entrypoint: read config.toml and start uvicorn."""
+    """Console entrypoint: load .env, read config.toml and start uvicorn."""
+    # Load .env into os.environ before any config/profile reads. Populates both
+    # config.Settings (BaseSettings) and the os.getenv calls in profiles.py.
+    # Real shell env vars take precedence (override=False). Done here (not at
+    # import) so tests that import `app` are not polluted by a developer .env.
+    load_dotenv(override=False)
+
     proxy_config, from_file = get_or_load_config()
     if not from_file:
         print(
