@@ -224,6 +224,10 @@ async def _dispatch(
                         "upstream_host": _hostname(upstream_url),
                     }
                 # passthrough path (with optional model_map rewrite)
+                # When a rewrite occurs, body_json is re-serialised via json.dumps.
+                # All fields — including cache_control on system/message blocks — are
+                # preserved because json.loads→dict→json.dumps is a lossless round-trip
+                # for every JSON-representable value and preserves insertion order.
                 upstream_model = client_model
                 if model_map and client_model in model_map:
                     upstream_model = model_map[client_model]
