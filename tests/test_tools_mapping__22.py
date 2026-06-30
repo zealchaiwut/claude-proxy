@@ -1,6 +1,5 @@
 """Tests for issue #22: Anthropic tools and tool_choice → OpenAI format mapping."""
 
-import pytest
 from schemas.anthropic import MessagesRequest
 from services.translator import to_openai_request
 

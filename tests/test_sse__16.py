@@ -318,7 +318,6 @@ async def test_ping_appears_before_first_content_delta():
 
 def test_no_http_framework_imports():
     """AC11: services.sse must not import FastAPI, Starlette, or aiohttp."""
-    import importlib
     import sys
 
     # Remove cached module to inspect freshly
