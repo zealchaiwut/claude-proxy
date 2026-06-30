@@ -237,6 +237,12 @@ async def messages_passthrough(request: Request) -> Response:
     profile_name = _get_profile_name(request)
     requested_model = body_json.get("model", "")
 
+    correlation = {
+        "run_id": request.headers.get("x-ccproxy-run") or None,
+        "role": request.headers.get("x-ccproxy-role") or None,
+        "ticket": request.headers.get("x-ccproxy-ticket") or None,
+    }
+
     response, log_meta = await _dispatch(request, body_bytes, body_json, headers, profile_name)
 
     request_logger: RequestLogger | None = getattr(request.app.state, "request_logger", None)
@@ -249,7 +255,7 @@ async def messages_passthrough(request: Request) -> Response:
             method=request.method,
             path=request.url.path,
             start=start,
-            log_meta=log_meta,
+            log_meta={**log_meta, **correlation},
         )
 
     return response
