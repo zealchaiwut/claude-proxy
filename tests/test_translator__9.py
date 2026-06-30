@@ -128,8 +128,8 @@ def test_tool_use_blocks_silently_skipped():
     assert result.messages[0]["content"] == "Using tool"
 
 
-# AC: tool_result blocks silently skipped (no exception)
-def test_tool_result_blocks_silently_skipped():
+# AC (updated by issue #24): tool_result blocks become role:tool messages; remaining text blocks become user message
+def test_tool_result_blocks_become_tool_messages():
     req = _req(
         messages=[
             {
@@ -142,7 +142,11 @@ def test_tool_result_blocks_silently_skipped():
         ]
     )
     result = to_openai_request(req, model="gpt-4o")
-    assert result.messages[0]["content"] == "Done"
+    assert result.messages[0]["role"] == "tool"
+    assert result.messages[0]["tool_call_id"] == "t1"
+    assert result.messages[0]["content"] == "result"
+    assert result.messages[1]["role"] == "user"
+    assert result.messages[1]["content"] == "Done"
 
 
 # AC: system message is leading (before conversation turns)
