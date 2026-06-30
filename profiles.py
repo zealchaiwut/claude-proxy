@@ -4,6 +4,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from services.cost_accounting import PricingConfig
+
 
 @dataclass
 class ServerConfig:
@@ -18,6 +20,7 @@ class ProfileConfig:
     api_key_env: str | None = None
     model: str | None = None
     model_map: dict[str, str] = field(default_factory=dict)
+    pricing: PricingConfig | None = None
 
 
 @dataclass
@@ -46,6 +49,13 @@ class ProfileRegistry:
         api_key = os.environ.get(profile.api_key_env) if profile.api_key_env else None
         return (profile.kind, profile.upstream, api_key, profile.model, profile.model_map)
 
+    def get_pricing(self, name: str) -> PricingConfig | None:
+        """Return the PricingConfig for the named profile, or None if not configured."""
+        profile = self._config.profiles.get(name)
+        if profile is None:
+            return None
+        return profile.pricing
+
 
 def load_config(path: Path) -> ProxyConfig:
     """Parse a config.toml file into a ProxyConfig."""
@@ -60,12 +70,22 @@ def load_config(path: Path) -> ProxyConfig:
 
     profiles: dict[str, ProfileConfig] = {}
     for name, p in raw.get("profiles", {}).items():
+        pricing_raw = p.get("pricing")
+        pricing = (
+            PricingConfig(
+                input_per_mtok=float(pricing_raw["input_per_mtok"]),
+                output_per_mtok=float(pricing_raw["output_per_mtok"]),
+            )
+            if pricing_raw
+            else None
+        )
         profiles[name] = ProfileConfig(
             kind=p["kind"],
             upstream=p["upstream"],
             api_key_env=p.get("api_key_env"),
             model=p.get("model"),
             model_map=dict(p.get("model_map", {})),
+            pricing=pricing,
         )
 
     return ProxyConfig(server=server, profiles=profiles)

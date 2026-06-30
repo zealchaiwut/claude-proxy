@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import time
 from urllib.parse import urlparse
@@ -11,11 +12,28 @@ from profiles import ProfileRegistry, resolve_profile_name
 from routers._proxy_utils import filter_headers, proxy_request
 from schemas.anthropic import MessagesRequest, TextBlock
 from schemas.openai import ChatResponse
-from services.metrics_collector import MetricsCollector, _COST_PER_INPUT_TOKEN, _COST_PER_OUTPUT_TOKEN
+from services.cost_accounting import (
+    PricingConfig,
+    compute_est_cost,
+    count_input_tokens,
+    count_output_tokens,
+    extract_usage_from_response,
+    parse_anthropic_sse_usage,
+)
+from services.metrics_collector import (
+    MetricsCollector,
+    _COST_PER_INPUT_TOKEN,
+    _COST_PER_OUTPUT_TOKEN,
+)
 from services.request_logger import RequestLogger
-from services.translator import from_openai_response, live_stream_to_anthropic_sse, to_openai_request
+from services.translator import (
+    from_openai_response,
+    live_stream_to_anthropic_sse,
+    to_openai_request,
+)
 
 router = APIRouter()
+_log = logging.getLogger(__name__)
 
 
 def _filter_headers(headers) -> dict[str, str]:
@@ -51,8 +69,67 @@ def _get_profile_name(request: Request) -> str:
     )
 
 
+def _get_profile_pricing(
+    request: Request, profile_name: str
+) -> PricingConfig | None:
+    """Return PricingConfig for the active profile, or None when absent."""
+    if not getattr(request.app.state, "config_from_file", False):
+        return None
+    registry: ProfileRegistry | None = getattr(
+        request.app.state, "profile_registry", None
+    )
+    if registry is None:
+        return None
+    return registry.get_pricing(profile_name)
+
+
 def _hostname(url: str) -> str:
     return urlparse(url).hostname or url
+
+
+def _emit_log_record(
+    profile_name: str,
+    input_tokens: int,
+    output_tokens: int,
+    est_cost_usd: float | None,
+) -> None:
+    _log.info(
+        "request",
+        extra={
+            "profile": profile_name,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "est_cost_usd": est_cost_usd,
+        },
+    )
+
+
+def _log_non_streaming_cost(
+    response: Response,
+    body_json: dict,
+    profile_name: str,
+    pricing: PricingConfig | None,
+) -> None:
+    """Parse response content for usage and emit a cost log record."""
+    try:
+        raw = response.body if hasattr(response, "body") else response.content
+        resp_json = json.loads(raw)
+    except (ValueError, TypeError, AttributeError):
+        resp_json = {}
+
+    usage = extract_usage_from_response(resp_json)
+    if usage:
+        input_tokens, output_tokens = usage
+    else:
+        input_tokens = count_input_tokens(body_json)
+        text = ""
+        for block in resp_json.get("content", []):
+            if isinstance(block, dict) and block.get("type") == "text":
+                text += block.get("text", "")
+        output_tokens = count_output_tokens(text)
+
+    est_cost = compute_est_cost(input_tokens, output_tokens, pricing)
+    _emit_log_record(profile_name, input_tokens, output_tokens, est_cost)
 
 
 async def _passthrough(
@@ -112,10 +189,14 @@ async def _dispatch(
     """
     config_from_file: bool = getattr(request.app.state, "config_from_file", False)
     if config_from_file:
-        registry: ProfileRegistry | None = getattr(request.app.state, "profile_registry", None)
+        registry: ProfileRegistry | None = getattr(
+            request.app.state, "profile_registry", None
+        )
         if registry is not None:
             try:
-                kind, upstream_url, api_key, model, model_map = registry.resolve(profile_name)
+                kind, upstream_url, api_key, model, model_map = registry.resolve(
+                    profile_name
+                )
                 client_model = body_json.get("model", "")
                 if kind == "openai":
                     upstream_model = (
@@ -141,7 +222,9 @@ async def _dispatch(
                     upstream_model = model_map[client_model]
                     body_json = {**body_json, "model": upstream_model}
                     body_bytes = json.dumps(body_json).encode()
-                response = await _passthrough(request, body_bytes, body_json, headers, upstream_url)
+                response = await _passthrough(
+                    request, body_bytes, body_json, headers, upstream_url
+                )
                 return response, {
                     "profile_kind": "passthrough",
                     "upstream_model": upstream_model,
@@ -182,15 +265,24 @@ def _attach_logging(
     path: str,
     start: float,
     log_meta: dict,
+    body_json: dict,
+    pricing: PricingConfig | None,
 ) -> Response:
-    """Attach logging to response; wraps StreamingResponse body iterator for streamed requests."""
+    """Attach logging to response; wraps StreamingResponse for streamed requests.
+
+    Emits both the RequestLogger structural record and the cost accounting record.
+    """
     if isinstance(response, StreamingResponse):
         original = response.body_iterator
         _start = start
 
         async def _wrapped():
+            buf = b""
             try:
                 async for chunk in original:
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode()
+                    buf += chunk
                     yield chunk
             finally:
                 latency_ms = (time.monotonic() - _start) * 1000
@@ -206,6 +298,10 @@ def _attach_logging(
                 )
                 request_logger.emit(record)
 
+                in_tok, out_tok = parse_anthropic_sse_usage(buf, body_json)
+                est_cost = compute_est_cost(in_tok, out_tok, pricing)
+                _emit_log_record(profile_name, in_tok, out_tok, est_cost)
+
         response.body_iterator = _wrapped()
     else:
         latency_ms = (time.monotonic() - start) * 1000
@@ -220,6 +316,7 @@ def _attach_logging(
             **log_meta,
         )
         request_logger.emit(record)
+        _log_non_streaming_cost(response, body_json, profile_name, pricing)
 
     return response
 
@@ -285,6 +382,7 @@ async def messages_passthrough(request: Request) -> Response:
 
     profile_name = _get_profile_name(request)
     requested_model = body_json.get("model", "")
+    pricing = _get_profile_pricing(request, profile_name)
 
     correlation = {
         "run_id": request.headers.get("x-ccproxy-run") or None,
@@ -292,9 +390,13 @@ async def messages_passthrough(request: Request) -> Response:
         "ticket": request.headers.get("x-ccproxy-ticket") or None,
     }
 
-    response, log_meta = await _dispatch(request, body_bytes, body_json, headers, profile_name)
+    response, log_meta = await _dispatch(
+        request, body_bytes, body_json, headers, profile_name
+    )
 
-    request_logger: RequestLogger | None = getattr(request.app.state, "request_logger", None)
+    request_logger: RequestLogger | None = getattr(
+        request.app.state, "request_logger", None
+    )
     if request_logger is not None:
         response = _attach_logging(
             request_logger,
@@ -305,7 +407,28 @@ async def messages_passthrough(request: Request) -> Response:
             path=request.url.path,
             start=start,
             log_meta={**log_meta, **correlation},
+            body_json=body_json,
+            pricing=pricing,
         )
+    else:
+        # No RequestLogger wired — still emit cost accounting records.
+        if isinstance(response, StreamingResponse):
+            original = response.body_iterator
+
+            async def _cost_only():
+                buf = b""
+                async for chunk in original:
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode()
+                    buf += chunk
+                    yield chunk
+                in_tok, out_tok = parse_anthropic_sse_usage(buf, body_json)
+                est_cost = compute_est_cost(in_tok, out_tok, pricing)
+                _emit_log_record(profile_name, in_tok, out_tok, est_cost)
+
+            response.body_iterator = _cost_only()
+        else:
+            _log_non_streaming_cost(response, body_json, profile_name, pricing)
 
     metrics: MetricsCollector | None = getattr(request.app.state, "metrics_collector", None)
     if metrics is not None:
@@ -345,12 +468,22 @@ async def _handle_openai_mode(
     # XML mode: inject tool spec into system prompt and clear native tools
     if tool_mode == "xml" and anthropic_req.tools:
         from services.xml_tool_mode import build_xml_system_prompt
-        xml_system = build_xml_system_prompt(_get_system_text(anthropic_req), list(anthropic_req.tools))
-        anthropic_req = anthropic_req.model_copy(update={"system": xml_system, "tools": None, "tool_choice": None})
+
+        xml_system = build_xml_system_prompt(
+            _get_system_text(anthropic_req), list(anthropic_req.tools)
+        )
+        anthropic_req = anthropic_req.model_copy(
+            update={"system": xml_system, "tools": None, "tool_choice": None}
+        )
 
     if _wants_stream(request, body_json):
         return await _handle_openai_stream(
-            client, anthropic_req, openai_base_url, openai_api_key, openai_model, tool_mode=tool_mode
+            client,
+            anthropic_req,
+            openai_base_url,
+            openai_api_key,
+            openai_model,
+            tool_mode=tool_mode,
         )
 
     openai_req = to_openai_request(anthropic_req, model=openai_model)
@@ -369,7 +502,10 @@ async def _handle_openai_mode(
     # XML mode: post-process — extract tool calls from text blocks
     if tool_mode == "xml":
         from services.xml_tool_mode import parse_xml_tool_calls
-        full_text = "".join(b.text for b in anthropic_resp.content if isinstance(b, TextBlock))
+
+        full_text = "".join(
+            b.text for b in anthropic_resp.content if isinstance(b, TextBlock)
+        )
         cleaned, tool_blocks = parse_xml_tool_calls(full_text)
         if tool_blocks:
             new_content: list = []
@@ -400,12 +536,16 @@ async def _handle_openai_stream(
     from schemas.openai import ChatRequest
 
     openai_req = to_openai_request(anthropic_req, model=openai_model)
-    req_body = ChatRequest(
-        model=openai_model,
-        messages=openai_req.messages,
-        max_tokens=openai_req.max_tokens,
-        stream=True,
-    ).model_dump_json().encode()
+    req_body = (
+        ChatRequest(
+            model=openai_model,
+            messages=openai_req.messages,
+            max_tokens=openai_req.max_tokens,
+            stream=True,
+        )
+        .model_dump_json()
+        .encode()
+    )
 
     stream_ctx = client.stream(
         "POST",
@@ -426,19 +566,27 @@ async def _handle_openai_stream(
                 body += chunk
         finally:
             await stream_ctx.__aexit__(None, None, None)
-        return Response(content=body, status_code=upstream.status_code, media_type="application/json")
+        return Response(
+            content=body,
+            status_code=upstream.status_code,
+            media_type="application/json",
+        )
 
     if tool_mode == "xml":
         from services.xml_tool_mode import xml_buffered_sse
 
         async def _translate_xml():
             try:
-                async for frame in xml_buffered_sse(upstream.aiter_bytes(), model=openai_model):
+                async for frame in xml_buffered_sse(
+                    upstream.aiter_bytes(), model=openai_model
+                ):
                     yield frame.encode() if isinstance(frame, str) else frame
             finally:
                 await stream_ctx.__aexit__(None, None, None)
 
-        return StreamingResponse(_translate_xml(), status_code=200, media_type="text/event-stream")
+        return StreamingResponse(
+            _translate_xml(), status_code=200, media_type="text/event-stream"
+        )
 
     async def _translate():
         content_sent = False
@@ -452,7 +600,9 @@ async def _handle_openai_stream(
                 yield frame.encode() if isinstance(frame, str) else frame
         except Exception as exc:
             if content_sent:
-                err_frame = f'event: error\ndata: {json.dumps({"type": "error", "error": {"type": "stream_error", "message": str(exc)}})}\n\n'
+                err_frame = (
+                    f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'stream_error', 'message': str(exc)}})}\n\n"
+                )
                 yield err_frame.encode()
         finally:
             await stream_ctx.__aexit__(None, None, None)
@@ -477,7 +627,9 @@ async def count_tokens_passthrough(request: Request) -> Response:
     # Registry path
     config_from_file: bool = getattr(request.app.state, "config_from_file", False)
     if config_from_file:
-        registry: ProfileRegistry | None = getattr(request.app.state, "profile_registry", None)
+        registry: ProfileRegistry | None = getattr(
+            request.app.state, "profile_registry", None
+        )
         if registry is not None:
             try:
                 kind, upstream_url, _, _, _ = registry.resolve(profile_name)
