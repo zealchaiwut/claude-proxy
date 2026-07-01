@@ -3,6 +3,11 @@
 Per-sprint changelog for claude-proxy. Entries are written by the documentor when a
 sprint finishes. Dated per-sprint files live under [docs/changelog/](docs/changelog/).
 
+## Sprint 9
+
+- #59: Add optional per-request capture of proxied exchanges
+- #60: Add `ccproxy replay` command for captured requests
+
 ## Sprint 7
 
 - #48: Make claude-proxy installable with console entrypoints
